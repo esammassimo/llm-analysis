@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from db import make_supabase, get_env
+from db import make_supabase
 from llm_api import call_platform, MODELS
 from analysis import extract_brands, extract_urls, normalize_domain, compute_run_metrics
 
@@ -23,6 +23,7 @@ def execute_run(
     run_id: str,
     queries: List[Dict],      # [{id, query_text, query_type}]
     platforms: List[str],      # ["chatgpt", "claude", ...]
+    api_keys: Dict[str, str],  # {"openai": "sk-...", "anthropic": "sk-ant-...", ...}
     iterations: int = 3,
     language: str = "it",
     progress_callback=None,    # fn(completed, total, detail_str)
@@ -30,6 +31,7 @@ def execute_run(
     """
     Esegue un run completo: itera su query × piattaforme × iterazioni.
     Salva tutto su Supabase in tempo reale.
+    api_keys viene passato dal session_state di Streamlit.
     """
     sb = make_supabase()
     total_calls = len(queries) * len(platforms) * iterations
@@ -44,13 +46,35 @@ def execute_run(
 
     responses_by_platform: Dict[str, List[Dict]] = defaultdict(list)
     errors = []
+    _cancel_check_interval = 5  # controlla cancellazione ogni N chiamate
 
     for query in queries:
         for platform in platforms:
             for iteration in range(1, iterations + 1):
+                # ─── Cancellation check ──────────────────────────
+                if completed > 0 and completed % _cancel_check_interval == 0:
+                    try:
+                        status_check = sb.table("lvm_runs").select("status").eq("id", run_id).limit(1).execute()
+                        if status_check.data and status_check.data[0]["status"] == "cancelled":
+                            log.info(f"Run {run_id} cancellato dall'utente dopo {completed} chiamate.")
+                            sb.table("lvm_runs").update({
+                                "completed_at": datetime.utcnow().isoformat(),
+                                "completed_calls": completed,
+                                "error_log": f"Cancellato dall'utente dopo {completed}/{total_calls} chiamate.",
+                            }).eq("id", run_id).execute()
+                            return {
+                                "total": total_calls,
+                                "completed": completed,
+                                "errors": len(errors),
+                                "metrics": compute_run_metrics(responses_by_platform) if responses_by_platform else {},
+                                "cancelled": True,
+                            }
+                    except Exception:
+                        pass
+
                 try:
                     text, elapsed = call_platform(
-                        platform, query["query_text"], language
+                        platform, query["query_text"], api_keys, language
                     )
 
                     # Extract brands and URLs

@@ -19,7 +19,7 @@ import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from db import get_supabase, fetch_all, get_env
+from db import get_supabase, fetch_all, get_env, get_api_keys, upsert_user, get_user_projects, assign_user_to_project, get_all_users
 from llm_api import fetch_paa, MODELS
 from fanout import generate_fanout_queries
 from analysis import extract_brands, extract_urls, normalize_domain, jaccard
@@ -55,17 +55,83 @@ if "current_project" not in st.session_state:
 if "run_active" not in st.session_state:
     st.session_state.run_active = False
 
+# ─── API Keys (dai Secrets / .env, caricate una volta) ───────────────────────
+if "api_keys" not in st.session_state:
+    st.session_state.api_keys = get_api_keys()
 
-# ─── Sidebar: Project Selection ─────────────────────────────────────────────
+
+# ─── Google OAuth Login ─────────────────────────────────────────────────────
+def _login_gate():
+    """
+    Gestisce l'autenticazione Google OAuth.
+    Blocca l'app se l'utente non è autenticato o non ha il dominio corretto.
+    """
+    from streamlit_google_auth import Authenticate
+
+    authenticator = Authenticate(
+        secret_credentials_file="google_client_secret.json",
+        cookie_name="lvm_auth",
+        cookie_key=get_env("AUTH_COOKIE_KEY"),
+        redirect_uri=get_env("AUTH_REDIRECT_URI"),
+    )
+
+    authenticator.check_authentification()
+
+    if not st.session_state.get("connected"):
+        st.title("📡 LLM Visibility Monitor")
+        st.markdown("### Accedi con il tuo account Google")
+        authenticator.login()
+        st.stop()
+
+    # Verifica dominio email
+    user_email = st.session_state.get("user_info", {}).get("email", "")
+    allowed_domain = get_env("ALLOWED_DOMAIN")
+
+    if not user_email.endswith(f"@{allowed_domain}"):
+        st.error(f"Accesso non autorizzato. Solo gli account @{allowed_domain} possono accedere.")
+        authenticator.logout()
+        st.stop()
+
+    # Registra/aggiorna utente su Supabase
+    user_info = st.session_state.get("user_info", {})
+    upsert_user(
+        email=user_email,
+        display_name=user_info.get("name", ""),
+        avatar_url=user_info.get("picture", ""),
+    )
+
+    return user_email, authenticator
+
+
+user_email, authenticator = _login_gate()
+
+
+# ─── Sidebar: User info + Project Selection (filtrato per utente) ────────────
 def sidebar():
-    st.sidebar.title("📡 LLM Visibility Monitor")
+    # User info
+    user_info = st.session_state.get("user_info", {})
+    with st.sidebar:
+        col_avatar, col_name = st.columns([1, 3])
+        with col_avatar:
+            avatar = user_info.get("picture", "")
+            if avatar:
+                st.image(avatar, width=40)
+        with col_name:
+            st.markdown(f"**{user_info.get('name', '')}**")
+            st.caption(user_email)
+        if st.button("🚪 Logout", use_container_width=True):
+            authenticator.logout()
+
     st.sidebar.divider()
+    st.sidebar.title("📡 Progetti")
 
     sb = get_supabase()
-    projects = sb.table("lvm_projects").select("*").order("created_at", desc=True).execute().data or []
 
-    if projects:
-        options = {p["name"]: p for p in projects}
+    # Carica solo i progetti assegnati all'utente
+    user_projects = get_user_projects(user_email, sb)
+
+    if user_projects:
+        options = {p["name"]: p for p in user_projects}
         selected = st.sidebar.selectbox(
             "Progetto attivo",
             options=list(options.keys()),
@@ -76,7 +142,7 @@ def sidebar():
         )
         st.session_state.current_project = options[selected]
     else:
-        st.sidebar.info("Nessun progetto. Creane uno nella tab Setup.")
+        st.sidebar.info("Nessun progetto assegnato. Creane uno nella tab Setup.")
 
     st.sidebar.divider()
     if st.session_state.current_project:
@@ -119,7 +185,10 @@ with tab1:
                     "slug": slug,
                     "language": new_lang,
                 }).execute()
-                st.session_state.current_project = result.data[0]
+                new_project = result.data[0]
+                # Auto-assegna il progetto all'utente corrente
+                assign_user_to_project(user_email, new_project["id"], sb)
+                st.session_state.current_project = new_project
                 st.success(f"Progetto **{new_name}** creato!")
                 st.rerun()
             except Exception as e:
@@ -186,6 +255,13 @@ with tab2:
     kw_names = [k["keyword"] for k in keywords]
     kw_map = {k["keyword"]: k["id"] for k in keywords}
 
+    # API keys dai Secrets
+    api_keys_t2 = st.session_state.api_keys
+    if not api_keys_t2.get("serpapi"):
+        st.warning("⚠️ API key SerpAPI non configurata nei Secrets.")
+    if not api_keys_t2.get("anthropic"):
+        st.warning("⚠️ API key Anthropic non configurata nei Secrets (necessaria per fan-out).")
+
     col_paa, col_fanout = st.columns(2)
 
     with col_paa:
@@ -199,7 +275,7 @@ with tab2:
             all_paa = {}
             for i, kw in enumerate(selected_kw_paa):
                 try:
-                    questions = fetch_paa(kw, lang=lang)
+                    questions = fetch_paa(kw, api_keys=api_keys_t2, lang=lang)
                     all_paa[kw] = questions
 
                     # Save to DB
@@ -235,7 +311,7 @@ with tab2:
         if st.button("🧠 Genera Fan-out"):
             with st.spinner("Generazione query fan-out via Claude…"):
                 try:
-                    result = generate_fanout_queries(selected_kw_fan, lang=lang, n_per_keyword=n_fanout)
+                    result = generate_fanout_queries(selected_kw_fan, api_keys=api_keys_t2, lang=lang, n_per_keyword=n_fanout)
 
                     total = 0
                     for kw, queries in result.items():
@@ -444,6 +520,57 @@ with tab3:
 
         st.success("Configurazione salvata!")
 
+    # ─── Riepilogo Chiavi API (dai Secrets) ──────────────────────────────────
+    st.divider()
+    st.subheader("🔑 Chiavi API (dai Secrets)")
+    st.caption("Configurate nei Secrets di Streamlit Cloud o nel file .env locale.")
+
+    api_keys_status = st.session_state.api_keys
+    status_labels = {
+        "serpapi": "SerpAPI", "openai": "OpenAI", "anthropic": "Anthropic",
+        "google": "Google AI", "pplx": "Perplexity",
+    }
+    cols_status = st.columns(5)
+    for idx, (key_name, label) in enumerate(status_labels.items()):
+        with cols_status[idx]:
+            if api_keys_status.get(key_name):
+                st.success(f"✅ {label}")
+            else:
+                st.error(f"❌ {label}")
+
+    # ─── Gestione Utenti & Assegnazioni ──────────────────────────────────────
+    st.divider()
+    st.subheader("👥 Gestione Accessi Progetto")
+    st.caption("Assegna utenti al progetto corrente. Solo gli utenti con email @dominio autorizzato che hanno fatto almeno un login.")
+
+    if st.session_state.current_project:
+        sb = get_supabase()
+        pid = st.session_state.current_project["id"]
+
+        # Utenti già assegnati al progetto
+        assigned = sb.table("lvm_user_projects").select(
+            "user_email"
+        ).eq("project_id", pid).execute().data or []
+        assigned_emails = [a["user_email"] for a in assigned]
+
+        if assigned_emails:
+            st.markdown("**Utenti con accesso:**")
+            for email in assigned_emails:
+                st.caption(f"• {email}")
+
+        # Aggiungi utente
+        all_users = get_all_users(sb)
+        available = [u["email"] for u in all_users if u["email"] not in assigned_emails]
+
+        if available:
+            new_user = st.selectbox("Aggiungi utente al progetto", [""] + available)
+            if new_user and st.button("➕ Assegna"):
+                assign_user_to_project(new_user, pid, sb)
+                st.success(f"{new_user} assegnato al progetto.")
+                st.rerun()
+        else:
+            st.caption("Tutti gli utenti registrati sono già assegnati (o nessun altro utente ha fatto login).")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4: ESECUZIONE RUN
@@ -480,91 +607,221 @@ with tab4:
 
     total_calls = len(selected_queries) * len(all_platforms) * iterations
 
-    # Summary
-    st.markdown(f"""
-    **Riepilogo Run:**
-    - Query: **{len(selected_queries)}**
-    - Piattaforme: **{', '.join(all_platforms)}**
-    - Iterazioni: **{iterations}**
-    - Totale chiamate: **{total_calls}**
-    - Tempo stimato: **~{total_calls * 4 // 60} min**
-    """)
+    # ─── Check for existing run (running or cancelled) ───────────────────────
+    active_run = sb.table("lvm_runs").select("*").eq("project_id", pid).in_("status", ["running", "pending"]).order("created_at", desc=True).limit(1).execute().data
 
-    # Check for running runs
-    running = sb.table("lvm_runs").select("*").eq("project_id", pid).eq("status", "running").execute().data
-    if running:
-        run = running[0]
-        pct = (run["completed_calls"] or 0) / max(run["total_calls"] or 1, 1)
-        st.warning(f"⏳ Run in corso: {run['completed_calls']}/{run['total_calls']} chiamate ({pct:.0%})")
-        if st.button("🔄 Aggiorna stato"):
-            st.rerun()
-        st.stop()
+    if active_run:
+        run = active_run[0]
+        run_id = run["id"]
 
-    # Launch button
-    if st.button("🚀 Avvia Run", type="primary"):
-        # Create run record
-        run_result = sb.table("lvm_runs").insert({
-            "project_id": pid,
-            "config_id": config["id"],
-            "status": "pending",
-            "total_calls": total_calls,
-            "completed_calls": 0,
-        }).execute()
-        run_id = run_result.data[0]["id"]
+        st.subheader("📡 Run in corso")
 
-        # Progress UI
-        progress_bar = st.progress(0, text="Avvio run…")
-        status_text = st.empty()
-        metrics_placeholder = st.empty()
+        # ─── Progress bar ────────────────────────────────────────────────
+        completed_n = run["completed_calls"] or 0
+        total_n = run["total_calls"] or 1
+        pct = completed_n / max(total_n, 1)
+        st.progress(pct, text=f"{completed_n}/{total_n} chiamate ({pct:.0%})")
 
-        def update_progress(completed, total, detail):
-            pct = completed / max(total, 1)
-            progress_bar.progress(pct, text=f"{completed}/{total} — {detail}")
-            # Update DB
-            try:
-                sb.table("lvm_runs").update(
-                    {"completed_calls": completed}
-                ).eq("id", run_id).execute()
-            except Exception:
-                pass
+        # ─── Breakdown per piattaforma ───────────────────────────────────
+        responses_so_far = sb.table("lvm_responses").select(
+            "platform, response_time_s, error"
+        ).eq("run_id", run_id).execute().data or []
 
-        # Execute (synchronous for Streamlit)
-        try:
-            result = execute_run(
-                project_id=pid,
-                run_id=run_id,
-                queries=selected_queries,
-                platforms=all_platforms,
-                iterations=iterations,
-                language=run_lang,
-                progress_callback=update_progress,
+        if responses_so_far:
+            df_resp = pd.DataFrame(responses_so_far)
+            platform_stats = []
+            for p in all_platforms:
+                p_data = df_resp[df_resp["platform"] == p]
+                p_ok = p_data[p_data["error"].isna() | (p_data["error"] == "")]
+                p_err = p_data[p_data["error"].notna() & (p_data["error"] != "")]
+                avg_time = p_ok["response_time_s"].mean() if len(p_ok) > 0 else 0
+                platform_stats.append({
+                    "Piattaforma": p.upper(),
+                    "Completate": len(p_ok),
+                    "Errori": len(p_err),
+                    "Tempo medio (s)": round(avg_time, 1) if avg_time else "—",
+                })
+
+            st.dataframe(
+                pd.DataFrame(platform_stats),
+                use_container_width=True,
+                hide_index=True,
             )
 
-            progress_bar.progress(1.0, text="✅ Run completato!")
+            # ─── Ultime chiamate ─────────────────────────────────────────
+            last_responses = sb.table("lvm_responses").select(
+                "platform, query_text, iteration, response_time_s, error, created_at"
+            ).eq("run_id", run_id).order("created_at", desc=True).limit(10).execute().data or []
 
-            # Show summary
-            st.success(f"Run completato: {result['completed']}/{result['total']} chiamate, {result['errors']} errori.")
+            if last_responses:
+                with st.expander("🔍 Ultime 10 chiamate", expanded=False):
+                    for r in last_responses:
+                        status_icon = "❌" if r.get("error") else "✅"
+                        time_str = f"{r.get('response_time_s', 0):.1f}s" if r.get("response_time_s") else ""
+                        st.caption(
+                            f"{status_icon} **{r['platform']}** — {r['query_text'][:60]}… "
+                            f"(iter {r.get('iteration', '?')}) {time_str}"
+                        )
 
-            if result.get("metrics"):
-                st.subheader("Metriche rapide")
-                cols = st.columns(len(result["metrics"]) - 1)  # exclude _cross_platform
-                i = 0
-                for platform, m in result["metrics"].items():
-                    if platform == "_cross_platform":
-                        continue
-                    with cols[i % len(cols)]:
-                        st.metric(platform.upper(), f"{m.get('brand_count', 0)} brand")
-                        st.caption(f"Jaccard intra: {m.get('jaccard_intra', 0):.2f}")
-                        st.caption(f"Fonti: {m.get('source_count', 0)}")
-                    i += 1
+            # ─── Errori recenti ──────────────────────────────────────────
+            recent_errors = sb.table("lvm_responses").select(
+                "platform, query_text, error, created_at"
+            ).eq("run_id", run_id).neq("error", "").order("created_at", desc=True).limit(5).execute().data or []
 
-        except Exception as e:
-            st.error(f"Errore durante il run: {e}")
-            sb.table("lvm_runs").update({
-                "status": "failed",
-                "error_log": str(e)[:1000],
-                "completed_at": datetime.utcnow().isoformat(),
-            }).eq("id", run_id).execute()
+            if recent_errors:
+                with st.expander(f"⚠️ Errori recenti ({len(recent_errors)})", expanded=False):
+                    for e in recent_errors:
+                        st.error(f"**{e['platform']}** — {e['query_text'][:50]}…\n`{e['error'][:200]}`")
+
+        # ─── Azioni: Stop / Refresh ──────────────────────────────────────
+        col_stop, col_refresh = st.columns(2)
+
+        with col_stop:
+            if st.button("⏹️ Ferma Run", type="primary"):
+                sb.table("lvm_runs").update({
+                    "status": "cancelled",
+                }).eq("id", run_id).execute()
+                st.warning("Richiesta di cancellazione inviata. Il run si fermerà entro pochi secondi.")
+                time.sleep(2)
+                st.rerun()
+
+        with col_refresh:
+            if st.button("🔄 Aggiorna stato"):
+                st.rerun()
+
+        # Auto-refresh hint
+        st.caption("💡 La pagina non si aggiorna automaticamente. Clicca 'Aggiorna stato' per vedere il progresso.")
+
+    else:
+        # ─── Nessun run attivo: mostra ultimo completato/cancellato ──────
+        last_run = sb.table("lvm_runs").select("*").eq("project_id", pid).order("created_at", desc=True).limit(1).execute().data
+
+        if last_run and last_run[0]["status"] in ("completed", "cancelled", "failed"):
+            lr = last_run[0]
+            status_color = {"completed": "🟢", "cancelled": "🟡", "failed": "🔴"}.get(lr["status"], "⚪")
+            st.info(
+                f"Ultimo run: {status_color} **{lr['status']}** — "
+                f"{lr['completed_calls'] or 0}/{lr['total_calls'] or 0} chiamate — "
+                f"{lr['created_at'][:16]}"
+            )
+
+            # ─── Pulsante Riavvia (clona config dell'ultimo run) ─────────
+            if lr["status"] in ("cancelled", "failed"):
+                if st.button("🔁 Riavvia ultimo run"):
+                    run_result = sb.table("lvm_runs").insert({
+                        "project_id": pid,
+                        "config_id": config["id"],
+                        "status": "pending",
+                        "total_calls": total_calls,
+                        "completed_calls": 0,
+                    }).execute()
+                    new_run_id = run_result.data[0]["id"]
+
+                    progress_bar = st.progress(0, text="Riavvio run…")
+
+                    def update_progress(completed, total, detail):
+                        pct = completed / max(total, 1)
+                        progress_bar.progress(pct, text=f"{completed}/{total} — {detail}")
+                        try:
+                            sb.table("lvm_runs").update(
+                                {"completed_calls": completed}
+                            ).eq("id", new_run_id).execute()
+                        except Exception:
+                            pass
+
+                    try:
+                        result = execute_run(
+                            project_id=pid,
+                            run_id=new_run_id,
+                            queries=selected_queries,
+                            platforms=all_platforms,
+                            api_keys=st.session_state.api_keys,
+                            iterations=iterations,
+                            language=run_lang,
+                            progress_callback=update_progress,
+                        )
+                        if result.get("cancelled"):
+                            st.warning(f"Run fermato: {result['completed']}/{result['total']} chiamate completate.")
+                        else:
+                            progress_bar.progress(1.0, text="✅ Run completato!")
+                            st.success(f"Run completato: {result['completed']}/{result['total']} chiamate, {result['errors']} errori.")
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
+                    st.rerun()
+
+        # ─── Riepilogo e lancio nuovo run ────────────────────────────────
+        st.divider()
+        st.subheader("🚀 Nuovo Run")
+
+        st.markdown(f"""
+        **Riepilogo:**
+        - Query: **{len(selected_queries)}**
+        - Piattaforme: **{', '.join(all_platforms)}**
+        - Iterazioni: **{iterations}**
+        - Totale chiamate: **{total_calls}**
+        - Tempo stimato: **~{total_calls * 4 // 60} min**
+        """)
+
+        if st.button("🚀 Avvia Run", type="primary"):
+            run_result = sb.table("lvm_runs").insert({
+                "project_id": pid,
+                "config_id": config["id"],
+                "status": "pending",
+                "total_calls": total_calls,
+                "completed_calls": 0,
+            }).execute()
+            run_id = run_result.data[0]["id"]
+
+            progress_bar = st.progress(0, text="Avvio run…")
+            status_text = st.empty()
+
+            def update_progress(completed, total, detail):
+                pct = completed / max(total, 1)
+                progress_bar.progress(pct, text=f"{completed}/{total} — {detail}")
+                try:
+                    sb.table("lvm_runs").update(
+                        {"completed_calls": completed}
+                    ).eq("id", run_id).execute()
+                except Exception:
+                    pass
+
+            try:
+                result = execute_run(
+                    project_id=pid,
+                    run_id=run_id,
+                    queries=selected_queries,
+                    platforms=all_platforms,
+                    api_keys=st.session_state.api_keys,
+                    iterations=iterations,
+                    language=run_lang,
+                    progress_callback=update_progress,
+                )
+
+                if result.get("cancelled"):
+                    st.warning(f"Run fermato dall'utente: {result['completed']}/{result['total']} chiamate completate.")
+                else:
+                    progress_bar.progress(1.0, text="✅ Run completato!")
+                    st.success(f"Run completato: {result['completed']}/{result['total']} chiamate, {result['errors']} errori.")
+
+                    if result.get("metrics"):
+                        st.subheader("Metriche rapide")
+                        metric_platforms = [k for k in result["metrics"] if k != "_cross_platform"]
+                        if metric_platforms:
+                            cols = st.columns(len(metric_platforms))
+                            for i, platform in enumerate(metric_platforms):
+                                m = result["metrics"][platform]
+                                with cols[i]:
+                                    st.metric(platform.upper(), f"{m.get('brand_count', 0)} brand")
+                                    st.caption(f"Jaccard intra: {m.get('jaccard_intra', 0):.2f}")
+                                    st.caption(f"Fonti: {m.get('source_count', 0)}")
+
+            except Exception as e:
+                st.error(f"Errore durante il run: {e}")
+                sb.table("lvm_runs").update({
+                    "status": "failed",
+                    "error_log": str(e)[:1000],
+                    "completed_at": datetime.utcnow().isoformat(),
+                }).eq("id", run_id).execute()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -766,7 +1023,10 @@ with tab5:
 
 # ─── Scheduler (basic APScheduler integration) ──────────────────────────────
 def _check_scheduler():
-    """Check if scheduled runs should be triggered."""
+    """
+    Scheduler per run automatici. Carica le API keys dai Secrets.
+    Funziona finché l'app Streamlit è attiva con un utente connesso.
+    """
     if "scheduler_initialized" in st.session_state:
         return
 
@@ -774,19 +1034,20 @@ def _check_scheduler():
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler()
 
+        # API keys dai Secrets (non dalla sessione)
+        _api_keys = get_api_keys()
+
         def scheduled_job():
             sb = get_supabase()
             active_configs = sb.table("lvm_run_configs").select("*").eq("is_active", True).execute().data or []
 
             for config in active_configs:
                 pid = config["project_id"]
-                # Check if a run was already done today
                 today = datetime.utcnow().strftime("%Y-%m-%d")
                 todays_runs = sb.table("lvm_runs").select("id", count="exact").eq("project_id", pid).gte("created_at", f"{today}T00:00:00").execute()
                 if (todays_runs.count or 0) >= config.get("daily_runs", 1):
                     continue
 
-                # Load selected queries
                 queries = sb.table("lvm_expanded_queries").select("id, query_text, query_type").eq("project_id", pid).eq("is_selected", True).execute().data or []
                 if not queries:
                     continue
@@ -803,7 +1064,6 @@ def _check_scheduler():
                     "total_calls": total,
                 }).execute()
 
-                # Execute in background thread
                 t = threading.Thread(
                     target=execute_run,
                     kwargs={
@@ -811,6 +1071,7 @@ def _check_scheduler():
                         "run_id": run_result.data[0]["id"],
                         "queries": queries,
                         "platforms": all_platforms,
+                        "api_keys": _api_keys,
                         "iterations": config["iterations_per_run"],
                         "language": config["language"],
                     },
@@ -818,12 +1079,11 @@ def _check_scheduler():
                 )
                 t.start()
 
-        # Schedule: check every hour
         scheduler.add_job(scheduled_job, "interval", hours=1, next_run_time=datetime.utcnow() + timedelta(minutes=1))
         scheduler.start()
         st.session_state.scheduler_initialized = True
     except ImportError:
-        pass  # APScheduler not installed
+        pass
 
 
 _check_scheduler()

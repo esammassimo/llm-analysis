@@ -4,17 +4,19 @@ fanout.py — Generazione query fan-out via LLM
 import json
 import re
 import requests
-from typing import List
-from db import get_env
+from typing import Dict, List
 
 
-def generate_fanout_queries(keywords: List[str], lang: str = "it",
+def generate_fanout_queries(keywords: List[str], api_keys: Dict[str, str],
+                            lang: str = "it",
                             n_per_keyword: int = 5) -> dict[str, list[str]]:
     """
     Genera query fan-out a partire dalle keyword seed usando Claude.
     Returns: {keyword: [query1, query2, ...]}
     """
-    api_key = get_env("ANTHROPIC_API_KEY")
+    api_key = api_keys.get("anthropic", "")
+    if not api_key:
+        raise RuntimeError("API key 'anthropic' non configurata. Vai in Configurazione → Chiavi API.")
 
     keyword_list = "\n".join(f"- {kw}" for kw in keywords)
 

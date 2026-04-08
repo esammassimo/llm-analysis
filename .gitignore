@@ -9,6 +9,7 @@ secrets.toml
 *.json
 !package.json
 service_account*.json
+google_client_secret*.json
 
 # ─── Template/example files (safe to push) ───────────────────────────────────
 !.env.example

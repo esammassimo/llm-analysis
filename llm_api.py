@@ -1,13 +1,15 @@
 """
 llm_api.py — Chiamate API a LLM (ChatGPT, Claude, Gemini, Perplexity)
                 e SERP (AI Overview, AI Mode) via SerpAPI
+
+Tutte le funzioni ricevono un dict `api_keys` con le chiavi,
+caricate dai Secrets e passate dall'engine/app.
 """
 import time
 import re
 import requests
 import logging
 from typing import Dict, Any, Optional, Tuple
-from db import get_env
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +38,22 @@ def get_system_prompt(lang: str = "it") -> str:
     return SYSTEM_PROMPT_IT if lang == "it" else SYSTEM_PROMPT_EN
 
 
+def _require_key(api_keys: Dict[str, str], key_name: str) -> str:
+    """Estrae una chiave dal dict, raise se mancante."""
+    val = api_keys.get(key_name, "")
+    if not val:
+        raise RuntimeError(
+            f"API key '{key_name}' non configurata. "
+            f"Vai nella tab Configurazione → Chiavi API."
+        )
+    return val
+
+
 # ─── ChatGPT ─────────────────────────────────────────────────────────────────
 
-def call_chatgpt(prompt: str, lang: str = "it", model: str | None = None) -> Tuple[str, float]:
-    api_key = get_env("OPENAI_API_KEY")
+def call_chatgpt(prompt: str, api_keys: Dict[str, str],
+                 lang: str = "it", model: str | None = None) -> Tuple[str, float]:
+    api_key = _require_key(api_keys, "openai")
     model = model or MODELS["chatgpt"]
     t0 = time.time()
     resp = requests.post(
@@ -63,8 +77,9 @@ def call_chatgpt(prompt: str, lang: str = "it", model: str | None = None) -> Tup
 
 # ─── Claude ──────────────────────────────────────────────────────────────────
 
-def call_claude(prompt: str, lang: str = "it", model: str | None = None) -> Tuple[str, float]:
-    api_key = get_env("ANTHROPIC_API_KEY")
+def call_claude(prompt: str, api_keys: Dict[str, str],
+                lang: str = "it", model: str | None = None) -> Tuple[str, float]:
+    api_key = _require_key(api_keys, "anthropic")
     model = model or MODELS["claude"]
     t0 = time.time()
     resp = requests.post(
@@ -89,8 +104,9 @@ def call_claude(prompt: str, lang: str = "it", model: str | None = None) -> Tupl
 
 # ─── Gemini ──────────────────────────────────────────────────────────────────
 
-def call_gemini(prompt: str, lang: str = "it", model: str | None = None) -> Tuple[str, float]:
-    api_key = get_env("GOOGLE_API_KEY")
+def call_gemini(prompt: str, api_keys: Dict[str, str],
+                lang: str = "it", model: str | None = None) -> Tuple[str, float]:
+    api_key = _require_key(api_keys, "google")
     model = model or MODELS["gemini"]
     t0 = time.time()
     resp = requests.post(
@@ -109,8 +125,9 @@ def call_gemini(prompt: str, lang: str = "it", model: str | None = None) -> Tupl
 
 # ─── Perplexity ──────────────────────────────────────────────────────────────
 
-def call_perplexity(prompt: str, lang: str = "it", model: str | None = None) -> Tuple[str, float]:
-    api_key = get_env("PPLX_API_KEY")
+def call_perplexity(prompt: str, api_keys: Dict[str, str],
+                    lang: str = "it", model: str | None = None) -> Tuple[str, float]:
+    api_key = _require_key(api_keys, "pplx")
     model = model or MODELS["perplexity"]
     t0 = time.time()
     resp = requests.post(
@@ -133,9 +150,10 @@ def call_perplexity(prompt: str, lang: str = "it", model: str | None = None) -> 
 
 # ─── SerpAPI: Google AI Overview ─────────────────────────────────────────────
 
-def call_ai_overview(query: str, lang: str = "it") -> Tuple[str, float]:
+def call_ai_overview(query: str, api_keys: Dict[str, str],
+                     lang: str = "it") -> Tuple[str, float]:
     """Fetches AI Overview via SerpAPI (two-step: google search → ai_overview token → fetch)."""
-    api_key = get_env("SERPAPI_KEY")
+    api_key = _require_key(api_keys, "serpapi")
     gl = "it" if lang == "it" else "us"
     hl = lang
     t0 = time.time()
@@ -195,8 +213,9 @@ def call_ai_overview(query: str, lang: str = "it") -> Tuple[str, float]:
 
 # ─── SerpAPI: Google AI Mode ────────────────────────────────────────────────
 
-def call_ai_mode(query: str, lang: str = "it") -> Tuple[str, float]:
-    api_key = get_env("SERPAPI_KEY")
+def call_ai_mode(query: str, api_keys: Dict[str, str],
+                 lang: str = "it") -> Tuple[str, float]:
+    api_key = _require_key(api_keys, "serpapi")
     gl = "it" if lang == "it" else "us"
     hl = lang
     t0 = time.time()
@@ -237,9 +256,10 @@ def call_ai_mode(query: str, lang: str = "it") -> Tuple[str, float]:
 
 # ─── SerpAPI: People Also Ask ────────────────────────────────────────────────
 
-def fetch_paa(keyword: str, lang: str = "it", max_questions: int = 10) -> list[str]:
+def fetch_paa(keyword: str, api_keys: Dict[str, str],
+              lang: str = "it", max_questions: int = 10) -> list[str]:
     """Fetch People Also Ask questions for a keyword via SerpAPI."""
-    api_key = get_env("SERPAPI_KEY")
+    api_key = _require_key(api_keys, "serpapi")
     gl = "it" if lang == "it" else "us"
     hl = lang
 
@@ -271,12 +291,12 @@ CALLERS = {
 }
 
 
-def call_platform(platform: str, query: str, lang: str = "it",
-                  model: str | None = None) -> Tuple[str, float]:
+def call_platform(platform: str, query: str, api_keys: Dict[str, str],
+                  lang: str = "it", model: str | None = None) -> Tuple[str, float]:
     """Dispatch to the right API caller."""
     fn = CALLERS.get(platform)
     if not fn:
         raise ValueError(f"Piattaforma sconosciuta: {platform}")
     if platform in ("ai_overview", "ai_mode"):
-        return fn(query, lang)
-    return fn(query, lang, model)
+        return fn(query, api_keys, lang)
+    return fn(query, api_keys, lang, model)

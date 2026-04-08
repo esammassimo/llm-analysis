@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS lvm_runs (
     id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     project_id      UUID REFERENCES lvm_projects(id) ON DELETE CASCADE,
     config_id       UUID REFERENCES lvm_run_configs(id),
-    status          TEXT DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed')),
+    status          TEXT DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','cancelled')),
     started_at      TIMESTAMPTZ,
     completed_at    TIMESTAMPTZ,
     total_calls     INT DEFAULT 0,
@@ -116,6 +116,24 @@ CREATE TABLE IF NOT EXISTS lvm_run_metrics (
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 
+-- 10. Utenti (auto-registrati al primo login Google)
+CREATE TABLE IF NOT EXISTS lvm_users (
+    email           TEXT PRIMARY KEY,
+    display_name    TEXT,
+    avatar_url      TEXT,
+    first_login     TIMESTAMPTZ DEFAULT now(),
+    last_login      TIMESTAMPTZ DEFAULT now()
+);
+
+-- 11. Assegnazione utente → progetto
+CREATE TABLE IF NOT EXISTS lvm_user_projects (
+    id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_email      TEXT REFERENCES lvm_users(email) ON DELETE CASCADE,
+    project_id      UUID REFERENCES lvm_projects(id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(user_email, project_id)
+);
+
 -- Indici per performance
 CREATE INDEX IF NOT EXISTS idx_lvm_keywords_project ON lvm_keywords(project_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_expanded_project ON lvm_expanded_queries(project_id);
@@ -126,3 +144,5 @@ CREATE INDEX IF NOT EXISTS idx_lvm_brand_run ON lvm_brand_mentions(run_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_brand_project ON lvm_brand_mentions(project_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_source_run ON lvm_source_citations(run_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_metrics_run ON lvm_run_metrics(run_id);
+CREATE INDEX IF NOT EXISTS idx_lvm_user_projects_email ON lvm_user_projects(user_email);
+CREATE INDEX IF NOT EXISTS idx_lvm_user_projects_project ON lvm_user_projects(project_id);

@@ -2,53 +2,66 @@
 
 ## Panoramica
 
-App Streamlit multi-pagina per il monitoraggio della visibilità brand su:
-- **LLM**: ChatGPT, Claude, Gemini, Perplexity
-- **SERP AI**: Google AI Overview, Google AI Mode
+App Streamlit per il monitoraggio della visibilità brand su LLM e SERP AI, con login Google OAuth e gestione multi-utente/multi-progetto.
+
+**Piattaforme monitorate:**
+- LLM: ChatGPT, Claude, Gemini, Perplexity
+- SERP AI: Google AI Overview, Google AI Mode
 - *(Stand-by)*: Copilot (Bing)
 
-### Flusso operativo
-
-1. **Setup** — Crea progetto, inserisci 10-20 keyword seed
-2. **Espansione** — Estrai PAA (SerpAPI) + genera fan-out (Claude), seleziona query
-3. **Configurazione** — Iterazioni, scheduling, lingua, piattaforme attive
-4. **Esecuzione** — Lancia run con progress bar in tempo reale
-5. **Storico & Report** — Grafici, metriche Jaccard, export Google Sheets / Excel
-
----
-
-## Prerequisiti
-
-### API Keys necessarie
-
-| Servizio | Variabile | Dove ottenerla |
-|----------|-----------|----------------|
-| Supabase | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | [supabase.com](https://supabase.com) → Project Settings → API |
-| SerpAPI | `SERPAPI_KEY` | [serpapi.com](https://serpapi.com) |
-| OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) |
-| Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
-| Google AI | `GOOGLE_API_KEY` | [aistudio.google.dev](https://aistudio.google.dev) |
-| Perplexity | `PPLX_API_KEY` | [perplexity.ai](https://docs.perplexity.ai) |
-| Google Sheets | `GOOGLE_SERVICE_ACCOUNT` | Google Cloud Console → Service Account |
-
-### Google Sheets Setup
-
-1. Vai su Google Cloud Console → IAM → Service Accounts
-2. Crea un service account
-3. Scarica il JSON delle credenziali
-4. Abilita Google Sheets API e Google Drive API nel progetto
-5. Su Streamlit Cloud, incolla il contenuto JSON come TOML dict in `[GOOGLE_SERVICE_ACCOUNT]`
+**Flusso operativo:**
+1. Login con Google → filtro su dominio email
+2. Setup → crea progetto, inserisci keyword seed
+3. Espansione → estrai PAA + genera fan-out, seleziona query
+4. Configurazione → iterazioni, scheduling, piattaforme, gestione accessi
+5. Esecuzione → lancia run con progress bar
+6. Storico & Report → grafici Jaccard, trend, export Google Sheets / Excel
 
 ---
 
-## Passo 1 — Database Supabase
+## Architettura Credenziali
+
+| Cosa | Dove | Note |
+|------|------|------|
+| Supabase URL + Key | Secrets / `.env` | Infrastruttura DB |
+| API keys (OpenAI, Anthropic, Google AI, Perplexity, SerpAPI) | Secrets / `.env` | Un unico set condiviso |
+| Google OAuth (client_id, client_secret) | `google_client_secret.json` | File nella root del progetto |
+| Cookie key + redirect URI + dominio | Secrets / `.env` | Configurazione login |
+| Google Sheets service account | Secrets / `.env` | Per export su Sheets |
+
+Le API keys vengono caricate una volta all'avvio dell'app e condivise tra tutti gli utenti e progetti.
+
+---
+
+## Passo 1 — Google Cloud: OAuth + Sheets
+
+### 1a. OAuth per il Login
+
+1. Vai su [Google Cloud Console](https://console.cloud.google.com)
+2. Crea un progetto (o usa uno esistente)
+3. **APIs & Services → Credentials → Create Credentials → OAuth 2.0 Client ID**
+4. Tipo: **Web Application**
+5. Authorized redirect URIs: aggiungi `https://tua-app.streamlit.app` (e `http://localhost:8501` per sviluppo locale)
+6. Scarica il JSON → rinominalo `google_client_secret.json` → mettilo nella root del progetto
+7. **APIs & Services → OAuth consent screen**: configura nome app, dominio, email supporto
+
+### 1b. Service Account per Google Sheets
+
+1. **IAM & Admin → Service Accounts → Create**
+2. Scarica il JSON delle credenziali
+3. **APIs & Services → Library**: abilita Google Sheets API e Google Drive API
+4. Su Streamlit Cloud, incolla il contenuto JSON come TOML dict in `[GOOGLE_SERVICE_ACCOUNT]`
+
+---
+
+## Passo 2 — Database Supabase
 
 1. Crea un progetto su [supabase.com](https://supabase.com)
 2. Vai su **SQL Editor**
 3. Incolla ed esegui il contenuto di `supabase_schema.sql`
 4. Annota URL e Service Role Key da **Project Settings → API**
 
-Le tabelle create:
+### Tabelle
 
 | Tabella | Scopo |
 |---------|-------|
@@ -61,50 +74,59 @@ Le tabelle create:
 | `lvm_brand_mentions` | Brand estratti per risposta |
 | `lvm_source_citations` | URL/fonti citate per risposta |
 | `lvm_run_metrics` | Metriche aggregate (Jaccard, conteggi) |
+| `lvm_users` | Utenti (auto-registrati al login Google) |
+| `lvm_user_projects` | Assegnazione utente → progetto |
 
 ---
 
-## Passo 2 — Setup Locale
+## Passo 3 — Setup Locale
 
 ```bash
-# Clona o crea il repo
 git init llm-visibility-monitor
 cd llm-visibility-monitor
 
-# Copia tutti i file del progetto nella root
+# Copia tutti i file del progetto
 
-# Installa dipendenze
 pip install -r requirements.txt
 
-# Configura .env
+# Configura
 cp .env.example .env
-# Modifica .env con le tue API key
+# Modifica .env con le tue credenziali
 
-# Avvia
+# Metti google_client_secret.json nella root
+
 streamlit run app.py
 ```
 
 ---
 
-## Passo 3 — Deploy su Streamlit Cloud
+## Passo 4 — Deploy su Streamlit Cloud
 
 1. Push del repo su GitHub (privato)
 2. Vai su [share.streamlit.io](https://share.streamlit.io) → **New app**
 3. Seleziona il repo, branch `main`, main file `app.py`
-4. **Advanced Settings → Secrets**: incolla il contenuto da `secrets.toml.example` con le tue chiavi reali
-5. Deploy
+4. **Advanced Settings → Secrets**: incolla il contenuto qui sotto con le tue chiavi
 
-### Struttura Secrets (TOML)
+### Secrets (TOML)
 
 ```toml
+# Supabase
 SUPABASE_URL = "https://xxxxx.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY = "eyJhbG..."
+
+# API Keys
 SERPAPI_KEY = "xxx"
 OPENAI_API_KEY = "sk-..."
 ANTHROPIC_API_KEY = "sk-ant-..."
 GOOGLE_API_KEY = "AIza..."
 PPLX_API_KEY = "pplx-..."
 
+# Google OAuth
+AUTH_COOKIE_KEY = "una_stringa_segreta_random_lunga_32chars"
+AUTH_REDIRECT_URI = "https://tua-app.streamlit.app"
+ALLOWED_DOMAIN = "tuaagenzia.com"
+
+# Google Sheets
 [GOOGLE_SERVICE_ACCOUNT]
 type = "service_account"
 project_id = "..."
@@ -116,14 +138,16 @@ auth_uri = "https://accounts.google.com/o/oauth2/auth"
 token_uri = "https://oauth2.googleapis.com/token"
 ```
 
+**Nota:** il file `google_client_secret.json` deve essere committato nel repo (non contiene segreti sensibili — solo client_id e redirect URIs). Il `.gitignore` è configurato per escluderlo; rimuovi la riga `google_client_secret*.json` dal `.gitignore` oppure aggiungilo con `git add -f`.
+
 ---
 
 ## Struttura File
 
 ```
 llm-visibility-monitor/
-├── app.py                          # App principale Streamlit (5 tab)
-├── db.py                           # Client Supabase, env helper, paginazione
+├── app.py                          # App Streamlit (login + 5 tab)
+├── db.py                           # Supabase client, API keys loader, user helpers
 ├── llm_api.py                      # Chiamate API: LLM + SERP (SerpAPI)
 ├── analysis.py                     # NER brand, URL, Jaccard, metriche
 ├── fanout.py                       # Generazione query fan-out via Claude
@@ -131,55 +155,30 @@ llm-visibility-monitor/
 ├── sheets_export.py                # Export su Google Sheets (gspread)
 ├── supabase_schema.sql             # Schema DDL per Supabase
 ├── requirements.txt                # Dipendenze Python
-├── .env.example                    # Template variabili d'ambiente (locale)
+├── google_client_secret.json       # OAuth credentials (da Google Cloud)
+├── .env                            # Variabili d'ambiente (locale)
+├── .env.example                    # Template .env
+├── .gitignore
 ├── .streamlit/
-│   ├── config.toml                 # Tema dark Streamlit
-│   └── secrets.toml.example        # Template Secrets (Streamlit Cloud)
+│   ├── config.toml                 # Tema dark
+│   └── secrets.toml.example        # Template Secrets
 └── GUIDA_DEPLOY.md                 # Questa guida
 ```
 
 ---
 
-## Moduli in Dettaglio
+## Sistema di Login
 
-### `llm_api.py` — Chiamate API
+- L'utente accede con il suo account Google
+- Solo le email `@ALLOWED_DOMAIN` passano il filtro
+- Al primo login l'utente viene auto-registrato in `lvm_users`
+- Nella sidebar vede solo i progetti a cui è stato assegnato
+- Quando crea un nuovo progetto, viene auto-assegnato
+- Nella tab Configurazione può assegnare altri utenti ai suoi progetti
 
-Ogni piattaforma ha la sua funzione dedicata:
+### Primo Utente
 
-- `call_chatgpt()` → OpenAI API (`gpt-4o`)
-- `call_claude()` → Anthropic API (`claude-sonnet-4-20250514`)
-- `call_gemini()` → Google Generative AI (`gemini-2.0-flash`)
-- `call_perplexity()` → Perplexity API (`sonar`)
-- `call_ai_overview()` → SerpAPI, engine `google` → token → `google_ai_overview`
-- `call_ai_mode()` → SerpAPI, engine `google_ai_mode`
-- `fetch_paa()` → SerpAPI, `related_questions` da Google Search
-
-Il dispatcher `call_platform(platform, query, lang)` smista automaticamente.
-
-### `analysis.py` — Estrazione & Metriche
-
-- **Brand extraction**: dual-mode (pattern markdown bold + regex su maiuscole), con stopword IT/EN
-- **URL extraction**: regex standard
-- **Jaccard intra-platform**: media pairwise tra iterazioni dello stesso prompt (ripetibilità)
-- **Jaccard cross-platform**: pairwise tra piattaforme (accordo)
-- Tutte le metriche vengono salvate in `lvm_run_metrics`
-
-### `engine.py` — Esecuzione Run
-
-Itera su `query × piattaforma × iterazione`, con:
-- Salvataggio in tempo reale su Supabase (ogni risposta, brand, fonte)
-- Progress callback per la UI
-- Rate limiting (`DELAY_BETWEEN_CALLS = 2s`)
-- Gestione errori per singola chiamata (non blocca il run)
-- Calcolo metriche aggregate a fine run
-
-### `fanout.py` — Generazione Fan-out
-
-Usa Claude Sonnet per generare query fan-out dalle keyword seed. Il prompt chiede domande reali che un utente cercherebbe, coprendo intenti informativi, comparativi e transazionali.
-
-### Scheduler
-
-Lo scheduler usa APScheduler (BackgroundScheduler) per verificare ogni ora se ci sono configurazioni attive con run giornalieri da eseguire. Funziona su Streamlit Cloud finché l'app è attiva (cioè con almeno un utente connesso). Per scheduling più robusto, valuta un cron esterno o GitHub Actions.
+Al primo deploy, nessun utente è registrato. Il primo utente che fa login con email del dominio corretto viene registrato automaticamente. Quando crea il primo progetto, viene assegnato. Da lì può assegnare altri utenti dalla tab Configurazione.
 
 ---
 
@@ -193,7 +192,7 @@ Per un run tipico (50 query × 6 piattaforme × 3 iterazioni = 900 chiamate):
 | Anthropic (Claude Sonnet) | ~$1-3 |
 | Google (Gemini Flash) | ~$0.10 |
 | Perplexity (Sonar) | ~$1-2 |
-| SerpAPI (AIO + AI Mode + PAA) | ~$5-15 (dipende dal piano) |
+| SerpAPI (AIO + AI Mode + PAA) | ~$5-15 |
 | **Totale** | **~$10-25 per run** |
 
 ---
@@ -201,6 +200,7 @@ Per un run tipico (50 query × 6 piattaforme × 3 iterazioni = 900 chiamate):
 ## Note Tecniche
 
 - **Thread-safety**: ogni operazione DB nei thread usa `make_supabase()` (client non-cached)
-- **Paginazione**: `fetch_all()` pagina automaticamente oltre le 1000 righe di Supabase
-- **Secrets**: lo script legge prima da `st.secrets`, poi fallback su `os.getenv` (sviluppo locale)
-- **Copilot**: la struttura è pronta per l'integrazione futura — basta aggiungere `call_copilot()` in `llm_api.py` e il valore `"copilot"` nelle opzioni config
+- **Paginazione**: `fetch_all()` pagina automaticamente oltre le 1000 righe Supabase
+- **Secrets**: lo script legge prima da `st.secrets`, poi fallback su `os.getenv`
+- **Scheduler**: APScheduler verifica ogni ora, carica API keys dai Secrets
+- **Copilot**: predisposto — basta aggiungere `call_copilot()` in `llm_api.py`

@@ -1,0 +1,50 @@
+# ─── Secrets & API Keys ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+secrets.toml
+.streamlit/secrets.toml
+*.pem
+*.key
+*.json
+!package.json
+service_account*.json
+
+# ─── Template/example files (safe to push) ───────────────────────────────────
+!.env.example
+!secrets.toml.example
+!.streamlit/secrets.toml.example
+
+# ─── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+
+# ─── Virtual environments ───────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ─── IDE / Editor ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Output / temp files ────────────────────────────────────────────────────
+*.xlsx
+*.csv
+*.log
+output/
+tmp/

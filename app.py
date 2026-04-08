@@ -872,15 +872,11 @@ with tab5:
         # Chart 1: Top brand per piattaforma
         st.markdown("#### Top Brand per Piattaforma")
         brand_counts = brands_df.groupby(["platform", "brand"])["mention_count"].sum().reset_index()
-        top_brands = brand_counts.groupby("platform").apply(
-            lambda x: x.nlargest(10, "mention_count")
-        ).reset_index(drop=True)
 
-        # Pivot for display
-        if not top_brands.empty:
-            for platform in top_brands["platform"].unique():
+        if not brand_counts.empty:
+            for platform in brand_counts["platform"].unique():
+                pf_data = brand_counts[brand_counts["platform"] == platform].nlargest(10, "mention_count").sort_values("mention_count", ascending=False)
                 with st.expander(f"🏷️ {platform.upper()}", expanded=True):
-                    pf_data = top_brands[top_brands["platform"] == platform].sort_values("mention_count", ascending=False)
                     st.bar_chart(pf_data.set_index("brand")["mention_count"])
 
         # Chart 2: Brand overlap matrix

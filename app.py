@@ -15,9 +15,14 @@ import streamlit as st
 import pandas as pd
 import time
 import json
+import sys
 import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
+from pathlib import Path
+
+# Assicura che i moduli locali siano trovabili indipendentemente dal working directory
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import get_supabase, fetch_all, get_env, get_api_keys, upsert_user, get_user_projects, assign_user_to_project, get_all_users
 from llm_api import fetch_paa, MODELS

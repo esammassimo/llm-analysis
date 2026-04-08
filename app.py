@@ -514,7 +514,12 @@ with tab4:
         st.warning("Nessuna query selezionata. Vai alla tab Espansione e seleziona le query.")
         st.stop()
 
-    total_calls = len(selected_queries) * len(all_platforms) * iterations
+    # SERP platforms (AI Overview, AI Mode) hanno sempre 1 iterazione
+    _serp = {"ai_overview", "ai_mode"}
+    total_calls = sum(
+        len(selected_queries) * (1 if p in _serp else iterations)
+        for p in all_platforms
+    )
 
     # ─── Check for active run ────────────────────────────────────────────────
     active_run = sb.table("lvm_runs").select("*").eq("project_id", pid).in_("status", ["running", "pending"]).order("created_at", desc=True).limit(1).execute().data
@@ -560,7 +565,7 @@ with tab4:
                 p_ok = p_data[p_data["error"].isna() | (p_data["error"] == "")]
                 p_err = p_data[p_data["error"].notna() & (p_data["error"] != "")]
                 avg_t = p_ok["response_time_s"].mean() if len(p_ok) > 0 else 0
-                expected = len(selected_queries) * iterations
+                expected = len(selected_queries) * (1 if p in _serp else iterations)
                 p_pct = len(p_data) / max(expected, 1)
 
                 platform_stats.append({

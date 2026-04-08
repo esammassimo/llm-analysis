@@ -146,6 +146,8 @@ def _process_single_call(
     """
     Processa una singola chiamata API: call → extract → save.
     Returns: dict con risultati per le metriche.
+    Ogni sotto-operazione è wrappata in try/except: un errore nel salvataggio
+    dei brand o delle fonti non blocca la task né il run.
     """
     # Chiamata con retry
     text, elapsed = _call_with_retry(platform, query["query_text"], api_keys, language)
@@ -155,7 +157,7 @@ def _process_single_call(
     urls = extract_urls(text) if text else []
     domains = [normalize_domain(u) for u in urls]
 
-    # Salva risposta
+    # Salva risposta (critica — se fallisce, lascia risalire l'eccezione)
     resp_data = {
         "run_id": run_id,
         "project_id": project_id,
@@ -167,37 +169,47 @@ def _process_single_call(
         "response_text": text[:50000] if text else "",
         "response_time_s": round(elapsed, 2),
     }
-    resp_result = sb.table("lvm_responses").insert(resp_data).execute()
-    response_id = resp_result.data[0]["id"] if resp_result.data else None
+    try:
+        resp_result = sb.table("lvm_responses").insert(resp_data).execute()
+        response_id = resp_result.data[0]["id"] if resp_result.data else None
+    except Exception as e:
+        log.error(f"Errore salvataggio risposta {platform}/{query['query_text'][:30]}: {e}")
+        response_id = None
 
-    # Salva brand mentions
+    # Salva brand mentions (non critica — errore loggato e ignorato)
     if response_id and brands:
-        brand_counts = {}
-        for b in brands:
-            brand_counts[b] = brand_counts.get(b, 0) + 1
-        for brand, count in brand_counts.items():
-            pos = text.lower().find(brand.lower()) if text else None
-            sb.table("lvm_brand_mentions").insert({
-                "response_id": response_id,
-                "run_id": run_id,
-                "project_id": project_id,
-                "platform": platform,
-                "brand": brand,
-                "mention_count": count,
-                "position_first": pos if pos and pos >= 0 else None,
-            }).execute()
+        try:
+            brand_counts = {}
+            for b in brands:
+                brand_counts[b] = brand_counts.get(b, 0) + 1
+            for brand, count in brand_counts.items():
+                pos = text.lower().find(brand.lower()) if text else None
+                sb.table("lvm_brand_mentions").insert({
+                    "response_id": response_id,
+                    "run_id": run_id,
+                    "project_id": project_id,
+                    "platform": platform,
+                    "brand": brand,
+                    "mention_count": count,
+                    "position_first": pos if pos and pos >= 0 else None,
+                }).execute()
+        except Exception as e:
+            log.error(f"Errore salvataggio brand {platform}: {e}")
 
-    # Salva source citations
+    # Salva source citations (non critica — errore loggato e ignorato)
     if response_id and urls:
-        for url, domain in zip(urls, domains):
-            sb.table("lvm_source_citations").insert({
-                "response_id": response_id,
-                "run_id": run_id,
-                "project_id": project_id,
-                "platform": platform,
-                "url": url[:2000],
-                "domain": domain,
-            }).execute()
+        try:
+            for url, domain in zip(urls, domains):
+                sb.table("lvm_source_citations").insert({
+                    "response_id": response_id,
+                    "run_id": run_id,
+                    "project_id": project_id,
+                    "platform": platform,
+                    "url": url[:2000],
+                    "domain": domain,
+                }).execute()
+        except Exception as e:
+            log.error(f"Errore salvataggio fonti {platform}: {e}")
 
     return {
         "query_text": query["query_text"],
@@ -246,10 +258,15 @@ def execute_run(
         raise RuntimeError(f"Validazione fallita:\n{error_msg}")
 
     # ─── Genera tutte le task (query × platform × iteration) ─────────────
+    # Le piattaforme SERP (AI Overview, AI Mode) hanno sempre 1 sola iterazione
+    # perché i risultati sono deterministici per query.
+    SERP_PLATFORMS = {"ai_overview", "ai_mode"}
+
     all_tasks = []
     for query in queries:
         for platform in platforms:
-            for iteration in range(1, iterations + 1):
+            platform_iterations = 1 if platform in SERP_PLATFORMS else iterations
+            for iteration in range(1, platform_iterations + 1):
                 all_tasks.append({
                     "query": query,
                     "platform": platform,
@@ -338,10 +355,13 @@ def execute_run(
 
             completed += 1
             if progress_callback:
-                progress_callback(
-                    completed, total_calls,
-                    f"{platform} — {task['query']['query_text'][:40]}… (iter {task['iteration']})"
-                )
+                try:
+                    progress_callback(
+                        completed, total_calls,
+                        f"{platform} — {task['query']['query_text'][:40]}… (iter {task['iteration']})"
+                    )
+                except Exception:
+                    pass  # non bloccare il run per un errore di UI
 
             # Checkpoint ogni 10 chiamate
             if completed % 10 == 0:

@@ -858,62 +858,198 @@ with tab5:
 
     st.divider()
 
-    # ─── Grafici ─────────────────────────────────────────────────────────────
+    # ─── Load data ───────────────────────────────────────────────────────────
     st.subheader("📊 Analisi Run")
 
-    # Load data
     brands_data = fetch_all("lvm_brand_mentions", sb, {"run_id": run_id})
     sources_data = fetch_all("lvm_source_citations", sb, {"run_id": run_id})
+    responses_data = fetch_all("lvm_responses", sb, {"run_id": run_id})
     metrics_data = fetch_all("lvm_run_metrics", sb, {"run_id": run_id})
 
-    if brands_data:
-        brands_df = pd.DataFrame(brands_data)
+    if not brands_data and not sources_data:
+        st.info("Nessun dato disponibile per questo run.")
+        st.stop()
 
-        # Chart 1: Top brand per piattaforma
-        st.markdown("#### Top Brand per Piattaforma")
-        brand_counts = brands_df.groupby(["platform", "brand"])["mention_count"].sum().reset_index()
+    brands_df = pd.DataFrame(brands_data) if brands_data else pd.DataFrame()
+    sources_df = pd.DataFrame(sources_data) if sources_data else pd.DataFrame()
+    responses_df = pd.DataFrame(responses_data) if responses_data else pd.DataFrame()
 
-        if not brand_counts.empty:
-            for platform in brand_counts["platform"].unique():
-                pf_data = brand_counts[brand_counts["platform"] == platform].nlargest(10, "mention_count").sort_values("mention_count", ascending=False)
-                with st.expander(f"🏷️ {platform.upper()}", expanded=True):
-                    st.bar_chart(pf_data.set_index("brand")["mention_count"])
+    # Conteggio risposte totali per piattaforma (per calcoli di frequenza)
+    total_responses_by_platform = {}
+    if not responses_df.empty:
+        valid_responses = responses_df[responses_df["error"].isna() | (responses_df["error"] == "")]
+        total_responses_by_platform = valid_responses.groupby("platform").size().to_dict()
+    total_responses_all = sum(total_responses_by_platform.values())
 
-        # Chart 2: Brand overlap matrix
-        st.markdown("#### Matrice Sovrapposizione Brand (Jaccard)")
-        platforms = brands_df["platform"].unique()
+    # Filtro piattaforma per tutta la sezione
+    available_platforms = sorted(set(
+        list(brands_df["platform"].unique() if not brands_df.empty else []) +
+        list(sources_df["platform"].unique() if not sources_df.empty else [])
+    ))
+    platform_filter = st.selectbox(
+        "Filtra per piattaforma",
+        ["Tutte le piattaforme"] + available_platforms,
+        key="tab5_platform_filter",
+    )
+
+    def _filter_df(df, col="platform"):
+        if platform_filter == "Tutte le piattaforme" or df.empty:
+            return df
+        return df[df[col] == platform_filter]
+
+    f_brands = _filter_df(brands_df)
+    f_sources = _filter_df(sources_df)
+    f_responses = _filter_df(responses_df)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # KPI CARDS
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown("#### 📌 KPI Principali")
+
+    if not f_brands.empty:
+        # Aggregazioni brand
+        brand_total_mentions = f_brands.groupby("brand")["mention_count"].sum()
+        total_mentions = brand_total_mentions.sum()
+        unique_brands = f_brands["brand"].nunique()
+
+        # Numero risposte in cui compare ciascun brand (consistenza)
+        brand_response_presence = f_brands.groupby("brand")["response_id"].nunique()
+
+        # Risposte valide nel filtro
+        filtered_total_responses = len(f_responses[
+            f_responses["error"].isna() | (f_responses["error"] == "")
+        ]) if not f_responses.empty else 1
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🏷️ Brand unici", unique_brands)
+        with col2:
+            st.metric("📢 Menzioni totali", int(total_mentions))
+        with col3:
+            n_citations = len(f_sources) if not f_sources.empty else 0
+            st.metric("🔗 Citazioni URL", n_citations)
+        with col4:
+            unique_domains = f_sources["domain"].nunique() if not f_sources.empty else 0
+            st.metric("🌐 Domini unici", unique_domains)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SHARE OF VOICE
+    # ═══════════════════════════════════════════════════════════════════════
+    if not f_brands.empty:
+        st.markdown("#### 📊 Share of Voice")
+        st.caption("Percentuale di menzioni di ciascun brand sul totale.")
+
+        sov = brand_total_mentions.sort_values(ascending=False).head(20)
+        sov_pct = (sov / total_mentions * 100).round(1)
+
+        sov_df = pd.DataFrame({
+            "Brand": sov_pct.index,
+            "Menzioni": sov.values,
+            "Share of Voice (%)": sov_pct.values,
+        })
+
+        col_chart, col_table = st.columns([2, 1])
+        with col_chart:
+            st.bar_chart(sov_pct)
+        with col_table:
+            st.dataframe(sov_df, use_container_width=True, hide_index=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # POSIZIONE MEDIA
+    # ═══════════════════════════════════════════════════════════════════════
+    if not f_brands.empty and "position_first" in f_brands.columns:
+        st.markdown("#### 📍 Posizione Media del Brand nella Risposta")
+        st.caption("Posizione media (in caratteri) della prima menzione. Più basso = menzionato prima.")
+
+        pos_data = f_brands[f_brands["position_first"].notna()].copy()
+        if not pos_data.empty:
+            avg_position = pos_data.groupby("brand")["position_first"].mean().sort_values()
+            top_pos = avg_position.head(15).round(0).astype(int)
+
+            st.bar_chart(top_pos)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FREQUENZA DI MENZIONE
+    # ═══════════════════════════════════════════════════════════════════════
+    if not f_brands.empty:
+        st.markdown("#### 📈 Frequenza di Menzione")
+        st.caption("In quante risposte (su totale) compare ciascun brand.")
+
+        freq = brand_response_presence.sort_values(ascending=False).head(20)
+        freq_pct = (freq / max(filtered_total_responses, 1) * 100).round(1)
+
+        freq_df = pd.DataFrame({
+            "Brand": freq.index,
+            "Risposte con menzione": freq.values,
+            f"Frequenza (% su {filtered_total_responses} risposte)": freq_pct.values,
+        })
+        st.dataframe(freq_df, use_container_width=True, hide_index=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOP 10 BRAND PER CONSISTENZA
+    # ═══════════════════════════════════════════════════════════════════════
+    if not f_brands.empty:
+        st.markdown("#### 🏆 Top 10 Brand per Consistenza")
+        st.caption("Brand che appaiono nel maggior numero di risposte diverse (spread cross-query/iterazione).")
+
+        consistency = brand_response_presence.sort_values(ascending=False).head(10)
+        consistency_df = pd.DataFrame({
+            "Brand": consistency.index,
+            "Risposte con presenza": consistency.values,
+            "Consistenza (%)": (consistency / max(filtered_total_responses, 1) * 100).round(1).values,
+            "Menzioni totali": [brand_total_mentions.get(b, 0) for b in consistency.index],
+        })
+        st.dataframe(consistency_df, use_container_width=True, hide_index=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOP 10 URL / DOMINI PER FREQUENZA E CONSISTENZA
+    # ═══════════════════════════════════════════════════════════════════════
+    if not f_sources.empty:
+        st.markdown("#### 🔗 Top 10 URL citati")
+
+        # Per frequenza (conteggio totale citazioni)
+        st.markdown("**Per frequenza** (numero totale di citazioni)")
+        domain_freq = f_sources.groupby("domain").size().sort_values(ascending=False).head(10).reset_index(name="Citazioni totali")
+        domain_freq.columns = ["Dominio", "Citazioni totali"]
+        st.dataframe(domain_freq, use_container_width=True, hide_index=True)
+
+        # Per consistenza (in quante risposte diverse compare)
+        st.markdown("**Per consistenza** (numero di risposte diverse in cui compare)")
+        domain_consistency = f_sources.groupby("domain")["response_id"].nunique().sort_values(ascending=False).head(10).reset_index()
+        domain_consistency.columns = ["Dominio", "Risposte con citazione"]
+        domain_consistency["Consistenza (%)"] = (
+            domain_consistency["Risposte con citazione"] / max(filtered_total_responses, 1) * 100
+        ).round(1)
+        st.dataframe(domain_consistency, use_container_width=True, hide_index=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # MATRICE JACCARD CROSS-PLATFORM
+    # ═══════════════════════════════════════════════════════════════════════
+    if not brands_df.empty and platform_filter == "Tutte le piattaforme":
+        st.markdown("#### 🔀 Matrice Sovrapposizione Brand (Jaccard)")
+        all_plats = brands_df["platform"].unique()
         platform_brand_sets = {}
-        for p in platforms:
+        for p in all_plats:
             platform_brand_sets[p] = set(
                 brands_df[brands_df["platform"] == p]["brand"].str.lower().unique()
             )
 
-        if len(platforms) >= 2:
+        if len(all_plats) >= 2:
             jaccard_matrix = []
-            for p1 in platforms:
+            for p1 in all_plats:
                 row = {}
-                for p2 in platforms:
+                for p2 in all_plats:
                     row[p2] = round(jaccard(platform_brand_sets[p1], platform_brand_sets[p2]), 3)
                 jaccard_matrix.append(row)
-
-            jdf = pd.DataFrame(jaccard_matrix, index=platforms)
+            jdf = pd.DataFrame(jaccard_matrix, index=all_plats)
             st.dataframe(jdf.style.background_gradient(cmap="RdYlGn", vmin=0, vmax=1),
-                        use_container_width=True)
+                         use_container_width=True)
 
-    # Sources chart
-    if sources_data:
-        st.markdown("#### Top Fonti Citate per Piattaforma")
-        sources_df = pd.DataFrame(sources_data)
-        domain_counts = sources_df.groupby(["platform", "domain"]).size().reset_index(name="citations")
-
-        for platform in sources_df["platform"].unique():
-            with st.expander(f"🔗 {platform.upper()} — Fonti"):
-                pf_sources = domain_counts[domain_counts["platform"] == platform].nlargest(15, "citations")
-                st.bar_chart(pf_sources.set_index("domain")["citations"])
-
-    # Metrics summary
+    # ═══════════════════════════════════════════════════════════════════════
+    # METRICHE AGGREGATE (dal motore)
+    # ═══════════════════════════════════════════════════════════════════════
     if metrics_data:
-        st.markdown("#### Metriche Aggregate")
+        st.markdown("#### 📐 Metriche Aggregate (engine)")
         met_df = pd.DataFrame(metrics_data)
         non_cross = met_df[met_df["platform"] != "cross_platform"]
 

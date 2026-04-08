@@ -2,6 +2,7 @@
 db.py — Supabase client, env helper, pagination
 """
 import os
+import time
 import streamlit as st
 from supabase import create_client, Client
 from typing import Any, Dict, List
@@ -21,14 +22,54 @@ def get_env(name: str) -> str:
     raise RuntimeError(f"Variabile '{name}' mancante. Configurala in Secrets o .env")
 
 
-@st.cache_resource
-def get_supabase() -> Client:
+def _create_client() -> Client:
+    """Crea un nuovo client Supabase."""
     return create_client(get_env("SUPABASE_URL"), get_env("SUPABASE_SERVICE_ROLE_KEY"))
+
+
+def get_supabase() -> Client:
+    """
+    Ritorna un client Supabase. Se il client cached ha perso la connessione,
+    ne crea uno nuovo.
+    """
+    if "sb_client" not in st.session_state:
+        st.session_state.sb_client = _create_client()
+    return st.session_state.sb_client
+
+
+def refresh_supabase() -> Client:
+    """Forza la ricreazione del client (dopo un errore di connessione)."""
+    st.session_state.sb_client = _create_client()
+    return st.session_state.sb_client
 
 
 def make_supabase() -> Client:
     """Non-cached: per thread separati."""
-    return create_client(get_env("SUPABASE_URL"), get_env("SUPABASE_SERVICE_ROLE_KEY"))
+    return _create_client()
+
+
+def sb_query(fn, max_retries: int = 2):
+    """
+    Wrapper con retry per le query Supabase.
+    Se la connessione cade (httpx.ReadError), ricrea il client e riprova.
+
+    Uso:
+        data = sb_query(lambda sb: sb.table("x").select("*").execute()).data
+    """
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            sb = get_supabase()
+            return fn(sb)
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            if any(k in error_str for k in ["readtimeout", "readerror", "connection", "closed", "reset"]):
+                refresh_supabase()
+                time.sleep(0.5)
+            else:
+                raise
+    raise last_error
 
 
 PAGE_SIZE = 1000

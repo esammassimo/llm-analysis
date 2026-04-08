@@ -24,11 +24,11 @@ from pathlib import Path
 # Assicura che i moduli locali siano trovabili indipendentemente dal working directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from db import get_supabase, fetch_all, get_env, get_api_keys
+from db import get_supabase, fetch_all, get_env, get_api_keys, sb_query, refresh_supabase
 from llm_api import fetch_paa, MODELS
 from fanout import generate_fanout_queries
 from brand_analysis import extract_brands, extract_urls, normalize_domain, jaccard
-from engine import execute_run
+from engine import execute_run, validate_api_keys, test_api_keys
 
 # ─── Page Config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -516,7 +516,7 @@ with tab4:
 
     total_calls = len(selected_queries) * len(all_platforms) * iterations
 
-    # ─── Check for existing run (running or cancelled) ───────────────────────
+    # ─── Check for active run ────────────────────────────────────────────────
     active_run = sb.table("lvm_runs").select("*").eq("project_id", pid).in_("status", ["running", "pending"]).order("created_at", desc=True).limit(1).execute().data
 
     if active_run:
@@ -525,30 +525,50 @@ with tab4:
 
         st.subheader("📡 Run in corso")
 
-        # ─── Progress bar ────────────────────────────────────────────────
+        # ─── Progress globale ────────────────────────────────────────────
         completed_n = run["completed_calls"] or 0
         total_n = run["total_calls"] or 1
         pct = completed_n / max(total_n, 1)
         st.progress(pct, text=f"{completed_n}/{total_n} chiamate ({pct:.0%})")
 
-        # ─── Breakdown per piattaforma ───────────────────────────────────
+        # ─── Dati dal DB per analisi dettagliata ─────────────────────────
         responses_so_far = sb.table("lvm_responses").select(
-            "platform, response_time_s, error"
+            "platform, response_time_s, error, query_text, iteration, response_text, created_at"
         ).eq("run_id", run_id).execute().data or []
 
         if responses_so_far:
             df_resp = pd.DataFrame(responses_so_far)
+
+            # ─── Tempo stimato rimanente ─────────────────────────────────
+            ok_responses = df_resp[df_resp["error"].isna() | (df_resp["error"] == "")]
+            if len(ok_responses) > 0 and ok_responses["response_time_s"].notna().any():
+                avg_time = ok_responses["response_time_s"].mean()
+                remaining = total_n - completed_n
+                eta_seconds = remaining * avg_time
+                eta_min = int(eta_seconds // 60)
+                eta_sec = int(eta_seconds % 60)
+                st.caption(f"⏱️ Tempo medio/chiamata: **{avg_time:.1f}s** — Stimato rimanente: **~{eta_min}m {eta_sec}s**")
+
+            # ─── Progress per piattaforma ────────────────────────────────
+            st.markdown("#### Stato per piattaforma")
             platform_stats = []
+            total_brands_found = 0
+            total_sources_found = 0
+
             for p in all_platforms:
                 p_data = df_resp[df_resp["platform"] == p]
                 p_ok = p_data[p_data["error"].isna() | (p_data["error"] == "")]
                 p_err = p_data[p_data["error"].notna() & (p_data["error"] != "")]
-                avg_time = p_ok["response_time_s"].mean() if len(p_ok) > 0 else 0
+                avg_t = p_ok["response_time_s"].mean() if len(p_ok) > 0 else 0
+                expected = len(selected_queries) * iterations
+                p_pct = len(p_data) / max(expected, 1)
+
                 platform_stats.append({
                     "Piattaforma": p.upper(),
-                    "Completate": len(p_ok),
+                    "Progresso": f"{len(p_data)}/{expected} ({p_pct:.0%})",
+                    "OK": len(p_ok),
                     "Errori": len(p_err),
-                    "Tempo medio (s)": round(avg_time, 1) if avg_time else "—",
+                    "Tempo medio": f"{avg_t:.1f}s" if avg_t else "—",
                 })
 
             st.dataframe(
@@ -557,108 +577,141 @@ with tab4:
                 hide_index=True,
             )
 
-            # ─── Ultime chiamate ─────────────────────────────────────────
+            # ─── Counter live: brand e fonti trovati ─────────────────────
+            brands_so_far = sb.table("lvm_brand_mentions").select("id", count="exact").eq("run_id", run_id).execute()
+            sources_so_far = sb.table("lvm_source_citations").select("id", count="exact").eq("run_id", run_id).execute()
+            n_brands = brands_so_far.count or 0
+            n_sources = sources_so_far.count or 0
+
+            col_b, col_s = st.columns(2)
+            with col_b:
+                st.metric("🏷️ Brand trovati", n_brands)
+            with col_s:
+                st.metric("🔗 Fonti trovate", n_sources)
+
+            # ─── Preview ultime risposte ─────────────────────────────────
             last_responses = sb.table("lvm_responses").select(
-                "platform, query_text, iteration, response_time_s, error, created_at"
-            ).eq("run_id", run_id).order("created_at", desc=True).limit(10).execute().data or []
+                "platform, query_text, iteration, response_time_s, response_text, error, created_at"
+            ).eq("run_id", run_id).order("created_at", desc=True).limit(8).execute().data or []
 
             if last_responses:
-                with st.expander("🔍 Ultime 10 chiamate", expanded=False):
+                with st.expander("🔍 Ultime chiamate (preview)", expanded=False):
                     for r in last_responses:
-                        status_icon = "❌" if r.get("error") else "✅"
-                        time_str = f"{r.get('response_time_s', 0):.1f}s" if r.get("response_time_s") else ""
+                        icon = "❌" if r.get("error") else "✅"
+                        t_str = f"{r.get('response_time_s', 0):.1f}s" if r.get("response_time_s") else ""
                         st.caption(
-                            f"{status_icon} **{r['platform']}** — {r['query_text'][:60]}… "
-                            f"(iter {r.get('iteration', '?')}) {time_str}"
+                            f"{icon} **{r['platform']}** — {r['query_text'][:50]}… "
+                            f"(iter {r.get('iteration', '?')}) {t_str}"
                         )
+                        if r.get("response_text") and not r.get("error"):
+                            snippet = r["response_text"][:200].replace("\n", " ")
+                            st.caption(f"   ↳ _{snippet}…_")
 
-            # ─── Errori recenti ──────────────────────────────────────────
-            recent_errors = sb.table("lvm_responses").select(
-                "platform, query_text, error, created_at"
-            ).eq("run_id", run_id).neq("error", "").order("created_at", desc=True).limit(5).execute().data or []
-
-            if recent_errors:
-                with st.expander(f"⚠️ Errori recenti ({len(recent_errors)})", expanded=False):
-                    for e in recent_errors:
+            # ─── Errori con filtro piattaforma ───────────────────────────
+            error_responses = df_resp[df_resp["error"].notna() & (df_resp["error"] != "")]
+            if len(error_responses) > 0:
+                with st.expander(f"⚠️ Errori ({len(error_responses)})", expanded=False):
+                    err_platform_filter = st.selectbox(
+                        "Filtra per piattaforma",
+                        ["Tutti"] + list(error_responses["platform"].unique()),
+                        key="err_filter_running",
+                    )
+                    filtered_errors = error_responses if err_platform_filter == "Tutti" else error_responses[error_responses["platform"] == err_platform_filter]
+                    for _, e in filtered_errors.head(15).iterrows():
                         st.error(f"**{e['platform']}** — {e['query_text'][:50]}…\n`{e['error'][:200]}`")
 
-        # ─── Azioni: Stop / Refresh ──────────────────────────────────────
+        # ─── Azioni ──────────────────────────────────────────────────────
         col_stop, col_refresh = st.columns(2)
-
         with col_stop:
             if st.button("⏹️ Ferma Run", type="primary"):
-                sb.table("lvm_runs").update({
-                    "status": "cancelled",
-                }).eq("id", run_id).execute()
-                st.warning("Richiesta di cancellazione inviata. Il run si fermerà entro pochi secondi.")
+                sb.table("lvm_runs").update({"status": "cancelled"}).eq("id", run_id).execute()
+                st.warning("Cancellazione inviata. Il run si fermerà entro pochi secondi.")
                 time.sleep(2)
                 st.rerun()
-
         with col_refresh:
             if st.button("🔄 Aggiorna stato"):
                 st.rerun()
 
-        # Auto-refresh hint
-        st.caption("💡 La pagina non si aggiorna automaticamente. Clicca 'Aggiorna stato' per vedere il progresso.")
+        # ─── Auto-refresh ogni 10 secondi ────────────────────────────────
+        auto_refresh = st.checkbox("🔄 Auto-refresh (ogni 10s)", value=False, key="auto_refresh_toggle")
+        if auto_refresh:
+            time.sleep(10)
+            st.rerun()
 
     else:
-        # ─── Nessun run attivo: mostra ultimo completato/cancellato ──────
+        # ─── Nessun run attivo ───────────────────────────────────────────
         last_run = sb.table("lvm_runs").select("*").eq("project_id", pid).order("created_at", desc=True).limit(1).execute().data
 
         if last_run and last_run[0]["status"] in ("completed", "cancelled", "failed"):
             lr = last_run[0]
-            status_color = {"completed": "🟢", "cancelled": "🟡", "failed": "🔴"}.get(lr["status"], "⚪")
+            status_icon = {"completed": "🟢", "cancelled": "🟡", "failed": "🔴"}.get(lr["status"], "⚪")
             st.info(
-                f"Ultimo run: {status_color} **{lr['status']}** — "
+                f"Ultimo run: {status_icon} **{lr['status']}** — "
                 f"{lr['completed_calls'] or 0}/{lr['total_calls'] or 0} chiamate — "
                 f"{lr['created_at'][:16]}"
             )
 
-            # ─── Pulsante Riavvia (clona config dell'ultimo run) ─────────
+            # ─── Resume run interrotto ───────────────────────────────────
             if lr["status"] in ("cancelled", "failed"):
-                if st.button("🔁 Riavvia ultimo run"):
-                    run_result = sb.table("lvm_runs").insert({
-                        "project_id": pid,
-                        "config_id": config["id"],
-                        "status": "pending",
-                        "total_calls": total_calls,
-                        "completed_calls": 0,
-                    }).execute()
-                    new_run_id = run_result.data[0]["id"]
+                col_resume, col_new = st.columns(2)
 
-                    progress_bar = st.progress(0, text="Riavvio run…")
+                with col_resume:
+                    remaining = (lr["total_calls"] or 0) - (lr["completed_calls"] or 0)
+                    if remaining > 0 and st.button(f"▶️ Riprendi run ({remaining} rimanenti)"):
+                        # Riusa lo stesso run_id, resume=True
+                        old_run_id = lr["id"]
+                        sb.table("lvm_runs").update({
+                            "status": "pending",
+                        }).eq("id", old_run_id).execute()
 
-                    def update_progress(completed, total, detail):
-                        pct = completed / max(total, 1)
-                        progress_bar.progress(pct, text=f"{completed}/{total} — {detail}")
+                        progress_bar = st.progress(0, text="Ripresa run…")
+                        def update_progress_resume(completed, total, detail):
+                            progress_bar.progress(completed / max(total, 1), text=f"{completed}/{total} — {detail}")
+
                         try:
-                            sb.table("lvm_runs").update(
-                                {"completed_calls": completed}
-                            ).eq("id", new_run_id).execute()
-                        except Exception:
-                            pass
+                            result = execute_run(
+                                project_id=pid, run_id=old_run_id,
+                                queries=selected_queries, platforms=all_platforms,
+                                api_keys=st.session_state.api_keys,
+                                iterations=iterations, language=run_lang,
+                                progress_callback=update_progress_resume,
+                                resume=True,
+                            )
+                            if result.get("cancelled"):
+                                st.warning(f"Run fermato: {result['completed']}/{result['total']} completate.")
+                            else:
+                                st.success(f"Run completato: {result['completed']}/{result['total']}, {result['errors']} errori, {result['elapsed_seconds']}s.")
+                        except Exception as e:
+                            st.error(f"Errore: {e}")
+                        st.rerun()
 
-                    try:
-                        result = execute_run(
-                            project_id=pid,
-                            run_id=new_run_id,
-                            queries=selected_queries,
-                            platforms=all_platforms,
-                            api_keys=st.session_state.api_keys,
-                            iterations=iterations,
-                            language=run_lang,
-                            progress_callback=update_progress,
-                        )
-                        if result.get("cancelled"):
-                            st.warning(f"Run fermato: {result['completed']}/{result['total']} chiamate completate.")
-                        else:
-                            progress_bar.progress(1.0, text="✅ Run completato!")
-                            st.success(f"Run completato: {result['completed']}/{result['total']} chiamate, {result['errors']} errori.")
-                    except Exception as e:
-                        st.error(f"Errore: {e}")
-                    st.rerun()
+                with col_new:
+                    if st.button("🔁 Nuovo run da zero"):
+                        run_result = sb.table("lvm_runs").insert({
+                            "project_id": pid, "config_id": config["id"],
+                            "status": "pending", "total_calls": total_calls, "completed_calls": 0,
+                        }).execute()
+                        new_run_id = run_result.data[0]["id"]
+                        progress_bar = st.progress(0, text="Avvio run…")
+                        def update_progress_new(completed, total, detail):
+                            progress_bar.progress(completed / max(total, 1), text=f"{completed}/{total} — {detail}")
+                        try:
+                            result = execute_run(
+                                project_id=pid, run_id=new_run_id,
+                                queries=selected_queries, platforms=all_platforms,
+                                api_keys=st.session_state.api_keys,
+                                iterations=iterations, language=run_lang,
+                                progress_callback=update_progress_new,
+                            )
+                            if result.get("cancelled"):
+                                st.warning(f"Run fermato: {result['completed']}/{result['total']} completate.")
+                            else:
+                                st.success(f"Run completato: {result['completed']}/{result['total']}, {result['errors']} errori.")
+                        except Exception as e:
+                            st.error(f"Errore: {e}")
+                        st.rerun()
 
-        # ─── Riepilogo e lancio nuovo run ────────────────────────────────
+        # ─── Riepilogo + Validazione pre-run + Lancio ────────────────────
         st.divider()
         st.subheader("🚀 Nuovo Run")
 
@@ -668,49 +721,58 @@ with tab4:
         - Piattaforme: **{', '.join(all_platforms)}**
         - Iterazioni: **{iterations}**
         - Totale chiamate: **{total_calls}**
-        - Tempo stimato: **~{total_calls * 4 // 60} min**
+        - Tempo stimato: **~{total_calls * 3 // 60} min** (con parallelismo)
         """)
 
-        if st.button("🚀 Avvia Run", type="primary"):
+        # ─── Validazione API keys ────────────────────────────────────────
+        validation_errors = validate_api_keys(all_platforms, st.session_state.api_keys)
+        if validation_errors:
+            st.error("**API keys mancanti:**")
+            for err in validation_errors:
+                st.warning(err)
+
+        # ─── Test connessione API ────────────────────────────────────────
+        if st.button("🔌 Testa connessione API"):
+            with st.spinner("Test in corso…"):
+                test_results = test_api_keys(all_platforms, st.session_state.api_keys, run_lang)
+            for platform, result in test_results.items():
+                if result.startswith("ok"):
+                    st.success(f"✅ {platform.upper()} — {result}")
+                else:
+                    st.error(f"❌ {platform.upper()} — {result}")
+
+        # ─── Lancio run ──────────────────────────────────────────────────
+        can_launch = len(validation_errors) == 0
+
+        if st.button("🚀 Avvia Run", type="primary", disabled=not can_launch):
             run_result = sb.table("lvm_runs").insert({
-                "project_id": pid,
-                "config_id": config["id"],
-                "status": "pending",
-                "total_calls": total_calls,
-                "completed_calls": 0,
+                "project_id": pid, "config_id": config["id"],
+                "status": "pending", "total_calls": total_calls, "completed_calls": 0,
             }).execute()
             run_id = run_result.data[0]["id"]
 
             progress_bar = st.progress(0, text="Avvio run…")
-            status_text = st.empty()
 
-            def update_progress(completed, total, detail):
-                pct = completed / max(total, 1)
-                progress_bar.progress(pct, text=f"{completed}/{total} — {detail}")
-                try:
-                    sb.table("lvm_runs").update(
-                        {"completed_calls": completed}
-                    ).eq("id", run_id).execute()
-                except Exception:
-                    pass
+            def update_progress_launch(completed, total, detail):
+                progress_bar.progress(completed / max(total, 1), text=f"{completed}/{total} — {detail}")
 
             try:
                 result = execute_run(
-                    project_id=pid,
-                    run_id=run_id,
-                    queries=selected_queries,
-                    platforms=all_platforms,
+                    project_id=pid, run_id=run_id,
+                    queries=selected_queries, platforms=all_platforms,
                     api_keys=st.session_state.api_keys,
-                    iterations=iterations,
-                    language=run_lang,
-                    progress_callback=update_progress,
+                    iterations=iterations, language=run_lang,
+                    progress_callback=update_progress_launch,
                 )
 
                 if result.get("cancelled"):
-                    st.warning(f"Run fermato dall'utente: {result['completed']}/{result['total']} chiamate completate.")
+                    st.warning(f"Run fermato: {result['completed']}/{result['total']} completate.")
                 else:
                     progress_bar.progress(1.0, text="✅ Run completato!")
-                    st.success(f"Run completato: {result['completed']}/{result['total']} chiamate, {result['errors']} errori.")
+                    st.success(
+                        f"Run completato: {result['completed']}/{result['total']} chiamate, "
+                        f"{result['errors']} errori, {result.get('elapsed_seconds', 0)}s totali."
+                    )
 
                     if result.get("metrics"):
                         st.subheader("Metriche rapide")
@@ -726,11 +788,14 @@ with tab4:
 
             except Exception as e:
                 st.error(f"Errore durante il run: {e}")
-                sb.table("lvm_runs").update({
-                    "status": "failed",
-                    "error_log": str(e)[:1000],
-                    "completed_at": datetime.utcnow().isoformat(),
-                }).eq("id", run_id).execute()
+                try:
+                    sb.table("lvm_runs").update({
+                        "status": "failed",
+                        "error_log": str(e)[:1000],
+                        "completed_at": datetime.utcnow().isoformat(),
+                    }).eq("id", run_id).execute()
+                except Exception:
+                    pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

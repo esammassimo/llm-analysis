@@ -134,6 +134,18 @@ CREATE TABLE IF NOT EXISTS lvm_user_projects (
     UNIQUE(user_email, project_id)
 );
 
+-- 12. Brand list configurabile per progetto
+CREATE TABLE IF NOT EXISTS lvm_brand_list (
+    id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    project_id      UUID REFERENCES lvm_projects(id) ON DELETE CASCADE,
+    brand_name      TEXT NOT NULL,          -- nome brand (es. "Findomestic")
+    brand_aliases   TEXT[] DEFAULT '{}',    -- varianti (es. {"Findo", "findomestic.it"})
+    brand_url       TEXT,                   -- sito ufficiale (es. "findomestic.it")
+    is_client       BOOLEAN DEFAULT FALSE,  -- true = brand del cliente
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(project_id, brand_name)
+);
+
 -- Indici per performance
 CREATE INDEX IF NOT EXISTS idx_lvm_keywords_project ON lvm_keywords(project_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_expanded_project ON lvm_expanded_queries(project_id);
@@ -146,3 +158,4 @@ CREATE INDEX IF NOT EXISTS idx_lvm_source_run ON lvm_source_citations(run_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_metrics_run ON lvm_run_metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_lvm_user_projects_email ON lvm_user_projects(user_email);
 CREATE INDEX IF NOT EXISTS idx_lvm_user_projects_project ON lvm_user_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_lvm_brand_list_project ON lvm_brand_list(project_id);

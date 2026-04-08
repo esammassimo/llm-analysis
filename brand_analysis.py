@@ -57,18 +57,46 @@ def extract_brands_from_bold(text: str) -> List[str]:
     return [b.strip() for b in bold + italic if len(b.strip()) >= 3]
 
 
-def extract_brands(text: str) -> List[str]:
-    """Combined brand extraction: bold + regex, deduplicated."""
+def extract_brands(text: str, known_brands: List[Dict] | None = None) -> List[str]:
+    """
+    Combined brand extraction.
+
+    Se known_brands è fornita (lista di {brand_name, brand_aliases}),
+    usa prima il match esatto/alias sulla lista nota, poi integra con
+    bold + regex per scoprire brand non in lista.
+
+    I brand della lista nota hanno priorità e vengono normalizzati
+    al nome canonico (brand_name).
+    """
+    found = []
+    seen = set()
+
+    # ─── Step 1: Match esatto su brand list nota ─────────────────────────
+    if known_brands:
+        text_lower = text.lower()
+        for brand_entry in known_brands:
+            name = brand_entry.get("brand_name", "")
+            aliases = brand_entry.get("brand_aliases") or []
+            # Cerca il nome principale e tutti gli alias
+            all_variants = [name] + [a for a in aliases if a]
+            for variant in all_variants:
+                if variant.lower() in text_lower:
+                    key = name.lower().strip()
+                    if key not in seen:
+                        seen.add(key)
+                        found.append(name)  # usa sempre il nome canonico
+                    break  # trovato, non serve cercare altri alias
+
+    # ─── Step 2: Bold + regex per scoprire brand non in lista ────────────
     bold_brands = extract_brands_from_bold(text)
     regex_brands = extract_brands_regex(text)
-    seen = set()
-    result = []
     for b in bold_brands + regex_brands:
         key = b.lower().strip()
         if key not in seen:
             seen.add(key)
-            result.append(b)
-    return result
+            found.append(b)
+
+    return found
 
 
 def extract_urls(text: str) -> List[str]:

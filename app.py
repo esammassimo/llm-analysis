@@ -170,6 +170,84 @@ with tab1:
                             pass  # duplicate
                     st.success(f"{added} keyword aggiunte.")
                     st.rerun()
+
+            # ─── Brand List ──────────────────────────────────────────────
+            st.divider()
+            st.subheader("🏷️ Brand List")
+            st.caption(
+                "Configura i brand da monitorare. I brand in lista vengono cercati "
+                "con match esatto (inclusi alias) e hanno priorità nell'estrazione. "
+                "Brand non in lista vengono comunque rilevati automaticamente."
+            )
+
+            # Mostra brand esistenti
+            existing_brands = sb.table("lvm_brand_list").select("*").eq(
+                "project_id", pid
+            ).order("is_client", desc=True).execute().data or []
+
+            if existing_brands:
+                brands_display = []
+                for b in existing_brands:
+                    aliases = b.get("brand_aliases") or []
+                    brands_display.append({
+                        "Brand": b["brand_name"],
+                        "Alias": ", ".join(aliases) if aliases else "—",
+                        "URL sito": b.get("brand_url") or "—",
+                        "Cliente": "⭐" if b.get("is_client") else "",
+                    })
+                st.dataframe(
+                    pd.DataFrame(brands_display),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # Aggiunta rapida (testo libero)
+            st.markdown("**Aggiunta rapida**")
+            brand_input = st.text_area(
+                "Aggiungi brand (uno per riga, formato: `NomeBrand | alias1, alias2 | url_sito | cliente`)",
+                height=120,
+                placeholder="Findomestic | Findo | findomestic.it | sì\nAgos\nYounited Credit | Younited | younited-credit.it",
+                key="brand_input",
+            )
+
+            if st.button("➕ Aggiungi Brand"):
+                lines = [l.strip() for l in brand_input.strip().split("\n") if l.strip()]
+                added_b = 0
+                for line in lines:
+                    parts = [p.strip() for p in line.split("|")]
+                    brand_name = parts[0] if len(parts) > 0 else ""
+                    aliases_str = parts[1] if len(parts) > 1 else ""
+                    brand_url = parts[2] if len(parts) > 2 else ""
+                    is_client_str = parts[3].lower() if len(parts) > 3 else ""
+
+                    if not brand_name:
+                        continue
+
+                    aliases = [a.strip() for a in aliases_str.split(",") if a.strip()] if aliases_str else []
+                    is_client = is_client_str in ("sì", "si", "yes", "true", "1", "⭐")
+
+                    try:
+                        sb.table("lvm_brand_list").insert({
+                            "project_id": pid,
+                            "brand_name": brand_name,
+                            "brand_aliases": aliases,
+                            "brand_url": brand_url or None,
+                            "is_client": is_client,
+                        }).execute()
+                        added_b += 1
+                    except Exception:
+                        pass  # duplicato
+                if added_b:
+                    st.success(f"{added_b} brand aggiunti.")
+                    st.rerun()
+
+            # Pulsante elimina tutti
+            if existing_brands:
+                if st.button("🗑️ Elimina tutti i brand", type="secondary"):
+                    sb.table("lvm_brand_list").delete().eq("project_id", pid).execute()
+                    st.success("Brand list svuotata.")
+                    st.rerun()
+
         else:
             st.info("Crea prima un progetto.")
 
@@ -874,6 +952,13 @@ with tab5:
     sources_df = pd.DataFrame(sources_data) if sources_data else pd.DataFrame()
     responses_df = pd.DataFrame(responses_data) if responses_data else pd.DataFrame()
 
+    # Carica brand list per evidenziare brand del cliente
+    brand_list_data = sb.table("lvm_brand_list").select(
+        "brand_name, brand_url, is_client"
+    ).eq("project_id", pid).execute().data or []
+    client_brands = {b["brand_name"].lower() for b in brand_list_data if b.get("is_client")}
+    client_urls = {b["brand_url"].lower() for b in brand_list_data if b.get("brand_url") and b.get("is_client")}
+
     # Conteggio risposte totali per piattaforma (per calcoli di frequenza)
     total_responses_by_platform = {}
     if not responses_df.empty:
@@ -937,12 +1022,13 @@ with tab5:
     # ═══════════════════════════════════════════════════════════════════════
     if not f_brands.empty:
         st.markdown("#### 📊 Share of Voice")
-        st.caption("Percentuale di menzioni di ciascun brand sul totale.")
+        st.caption("Percentuale di menzioni di ciascun brand sul totale. ⭐ = brand del cliente.")
 
         sov = brand_total_mentions.sort_values(ascending=False).head(20)
         sov_pct = (sov / total_mentions * 100).round(1)
 
         sov_df = pd.DataFrame({
+            "": ["⭐" if b.lower() in client_brands else "" for b in sov_pct.index],
             "Brand": sov_pct.index,
             "Menzioni": sov.values,
             "Share of Voice (%)": sov_pct.values,
@@ -979,6 +1065,7 @@ with tab5:
         freq_pct = (freq / max(filtered_total_responses, 1) * 100).round(1)
 
         freq_df = pd.DataFrame({
+            "": ["⭐" if b.lower() in client_brands else "" for b in freq.index],
             "Brand": freq.index,
             "Risposte con menzione": freq.values,
             f"Frequenza (% su {filtered_total_responses} risposte)": freq_pct.values,
@@ -990,10 +1077,11 @@ with tab5:
     # ═══════════════════════════════════════════════════════════════════════
     if not f_brands.empty:
         st.markdown("#### 🏆 Top 10 Brand per Consistenza")
-        st.caption("Brand che appaiono nel maggior numero di risposte diverse (spread cross-query/iterazione).")
+        st.caption("Brand che appaiono nel maggior numero di risposte diverse. ⭐ = brand del cliente.")
 
         consistency = brand_response_presence.sort_values(ascending=False).head(10)
         consistency_df = pd.DataFrame({
+            "": ["⭐" if b.lower() in client_brands else "" for b in consistency.index],
             "Brand": consistency.index,
             "Risposte con presenza": consistency.values,
             "Consistenza (%)": (consistency / max(filtered_total_responses, 1) * 100).round(1).values,

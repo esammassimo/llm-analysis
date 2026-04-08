@@ -142,6 +142,7 @@ def _process_single_call(
     sb, run_id: str, project_id: str,
     query: Dict, platform: str, iteration: int,
     api_keys: Dict[str, str], language: str,
+    known_brands: List[Dict] | None = None,
 ) -> Dict:
     """
     Processa una singola chiamata API: call → extract → save.
@@ -153,7 +154,7 @@ def _process_single_call(
     text, elapsed = _call_with_retry(platform, query["query_text"], api_keys, language)
 
     # Estrazione brand e URL
-    brands = extract_brands(text) if text else []
+    brands = extract_brands(text, known_brands=known_brands) if text else []
     urls = extract_urls(text) if text else []
     domains = [normalize_domain(u) for u in urls]
 
@@ -257,6 +258,18 @@ def execute_run(
         }).eq("id", run_id).execute()
         raise RuntimeError(f"Validazione fallita:\n{error_msg}")
 
+    # ─── Carica brand list del progetto (se configurata) ─────────────────
+    known_brands = None
+    try:
+        brand_list_resp = sb.table("lvm_brand_list").select(
+            "brand_name, brand_aliases, brand_url, is_client"
+        ).eq("project_id", project_id).execute()
+        if brand_list_resp.data:
+            known_brands = brand_list_resp.data
+            log.info(f"Brand list caricata: {len(known_brands)} brand configurati.")
+    except Exception as e:
+        log.warning(f"Errore caricamento brand list: {e}. Uso solo estrazione automatica.")
+
     # ─── Genera tutte le task (query × platform × iteration) ─────────────
     # Le piattaforme SERP (AI Overview, AI Mode) hanno sempre 1 sola iterazione
     # perché i risultati sono deterministici per query.
@@ -328,7 +341,7 @@ def execute_run(
                 result = _process_single_call(
                     platform_sb, run_id, project_id,
                     task["query"], platform, task["iteration"],
-                    api_keys, language,
+                    api_keys, language, known_brands,
                 )
                 results.append(result)
 

@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db import get_supabase, fetch_all, get_env, get_api_keys, upsert_user, get_user_projects, assign_user_to_project, get_all_users
 from llm_api import fetch_paa, MODELS
 from fanout import generate_fanout_queries
-from analysis import extract_brands, extract_urls, normalize_domain, jaccard
+from brand_analysis import extract_brands, extract_urls, normalize_domain, jaccard
 from engine import execute_run
 
 # ─── Page Config ─────────────────────────────────────────────────────────────

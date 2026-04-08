@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db import make_supabase
 from llm_api import call_platform, MODELS
-from analysis import extract_brands, extract_urls, normalize_domain, compute_run_metrics
+from brand_analysis import extract_brands, extract_urls, normalize_domain, compute_run_metrics
 
 log = logging.getLogger(__name__)
 

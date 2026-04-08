@@ -7,4 +7,3 @@ gspread>=6.0
 google-auth>=2.25
 apscheduler>=3.10
 python-dotenv>=1.0
-streamlit-google-auth>=0.1

@@ -24,7 +24,7 @@ from pathlib import Path
 # Assicura che i moduli locali siano trovabili indipendentemente dal working directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from db import get_supabase, fetch_all, get_env, get_api_keys, upsert_user, get_user_projects, assign_user_to_project, get_all_users
+from db import get_supabase, fetch_all, get_env, get_api_keys
 from llm_api import fetch_paa, MODELS
 from fanout import generate_fanout_queries
 from brand_analysis import extract_brands, extract_urls, normalize_domain, jaccard
@@ -65,78 +65,16 @@ if "api_keys" not in st.session_state:
     st.session_state.api_keys = get_api_keys()
 
 
-# ─── Google OAuth Login ─────────────────────────────────────────────────────
-def _login_gate():
-    """
-    Gestisce l'autenticazione Google OAuth.
-    Blocca l'app se l'utente non è autenticato o non ha il dominio corretto.
-    """
-    from streamlit_google_auth import Authenticate
-
-    authenticator = Authenticate(
-        secret_credentials_file="google_client_secret.json",
-        cookie_name="lvm_auth",
-        cookie_key=get_env("AUTH_COOKIE_KEY"),
-        redirect_uri=get_env("AUTH_REDIRECT_URI"),
-    )
-
-    authenticator.check_authentification()
-
-    if not st.session_state.get("connected"):
-        st.title("📡 LLM Visibility Monitor")
-        st.markdown("### Accedi con il tuo account Google")
-        authenticator.login()
-        st.stop()
-
-    # Verifica dominio email
-    user_email = st.session_state.get("user_info", {}).get("email", "")
-    allowed_domain = get_env("ALLOWED_DOMAIN")
-
-    if not user_email.endswith(f"@{allowed_domain}"):
-        st.error(f"Accesso non autorizzato. Solo gli account @{allowed_domain} possono accedere.")
-        authenticator.logout()
-        st.stop()
-
-    # Registra/aggiorna utente su Supabase
-    user_info = st.session_state.get("user_info", {})
-    upsert_user(
-        email=user_email,
-        display_name=user_info.get("name", ""),
-        avatar_url=user_info.get("picture", ""),
-    )
-
-    return user_email, authenticator
-
-
-user_email, authenticator = _login_gate()
-
-
-# ─── Sidebar: User info + Project Selection (filtrato per utente) ────────────
+# ─── Sidebar: Project Selection ─────────────────────────────────────────────
 def sidebar():
-    # User info
-    user_info = st.session_state.get("user_info", {})
-    with st.sidebar:
-        col_avatar, col_name = st.columns([1, 3])
-        with col_avatar:
-            avatar = user_info.get("picture", "")
-            if avatar:
-                st.image(avatar, width=40)
-        with col_name:
-            st.markdown(f"**{user_info.get('name', '')}**")
-            st.caption(user_email)
-        if st.button("🚪 Logout", use_container_width=True):
-            authenticator.logout()
-
+    st.sidebar.title("📡 LLM Visibility Monitor")
     st.sidebar.divider()
-    st.sidebar.title("📡 Progetti")
 
     sb = get_supabase()
+    projects = sb.table("lvm_projects").select("*").order("created_at", desc=True).execute().data or []
 
-    # Carica solo i progetti assegnati all'utente
-    user_projects = get_user_projects(user_email, sb)
-
-    if user_projects:
-        options = {p["name"]: p for p in user_projects}
+    if projects:
+        options = {p["name"]: p for p in projects}
         selected = st.sidebar.selectbox(
             "Progetto attivo",
             options=list(options.keys()),
@@ -147,7 +85,7 @@ def sidebar():
         )
         st.session_state.current_project = options[selected]
     else:
-        st.sidebar.info("Nessun progetto assegnato. Creane uno nella tab Setup.")
+        st.sidebar.info("Nessun progetto. Creane uno nella tab Setup.")
 
     st.sidebar.divider()
     if st.session_state.current_project:
@@ -191,8 +129,6 @@ with tab1:
                     "language": new_lang,
                 }).execute()
                 new_project = result.data[0]
-                # Auto-assegna il progetto all'utente corrente
-                assign_user_to_project(user_email, new_project["id"], sb)
                 st.session_state.current_project = new_project
                 st.success(f"Progetto **{new_name}** creato!")
                 st.rerun()
@@ -543,38 +479,6 @@ with tab3:
             else:
                 st.error(f"❌ {label}")
 
-    # ─── Gestione Utenti & Assegnazioni ──────────────────────────────────────
-    st.divider()
-    st.subheader("👥 Gestione Accessi Progetto")
-    st.caption("Assegna utenti al progetto corrente. Solo gli utenti con email @dominio autorizzato che hanno fatto almeno un login.")
-
-    if st.session_state.current_project:
-        sb = get_supabase()
-        pid = st.session_state.current_project["id"]
-
-        # Utenti già assegnati al progetto
-        assigned = sb.table("lvm_user_projects").select(
-            "user_email"
-        ).eq("project_id", pid).execute().data or []
-        assigned_emails = [a["user_email"] for a in assigned]
-
-        if assigned_emails:
-            st.markdown("**Utenti con accesso:**")
-            for email in assigned_emails:
-                st.caption(f"• {email}")
-
-        # Aggiungi utente
-        all_users = get_all_users(sb)
-        available = [u["email"] for u in all_users if u["email"] not in assigned_emails]
-
-        if available:
-            new_user = st.selectbox("Aggiungi utente al progetto", [""] + available)
-            if new_user and st.button("➕ Assegna"):
-                assign_user_to_project(new_user, pid, sb)
-                st.success(f"{new_user} assegnato al progetto.")
-                st.rerun()
-        else:
-            st.caption("Tutti gli utenti registrati sono già assegnati (o nessun altro utente ha fatto login).")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
